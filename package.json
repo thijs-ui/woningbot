@@ -1,0 +1,22 @@
+{
+  "name": "woningbot",
+  "version": "2.0.0",
+  "description": "Slimme Slack bot voor Spaans vastgoed — AI-makelaarassistent met Claude parsing, Apify scraping, en intelligente selectie",
+  "main": "src/app.js",
+  "scripts": {
+    "start": "node src/app.js",
+    "dev": "node --watch src/app.js",
+    "test": "node test.js"
+  },
+  "keywords": ["slack", "bot", "real-estate", "spain", "idealista", "claude", "ai"],
+  "author": "Costa Select",
+  "license": "MIT",
+  "dependencies": {
+    "@slack/bolt": "^4.1.0",
+    "@anthropic-ai/sdk": "^0.39.0",
+    "dotenv": "^16.4.7"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
