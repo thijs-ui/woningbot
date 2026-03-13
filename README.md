@@ -1,53 +1,85 @@
-# WoningBot V2.1 — AI Vastgoed-assistent voor Slack
+# WoningBot + NieuwbouwBot V3.0
 
-Slimme Slack bot die Spaans vastgoed doorzoekt op **Idealista**, **Fotocasa** en **Kyero**, de beste matches selecteert met AI, en foto's analyseert — alles vanuit een simpel `/zoekwoning` commando.
+Slimme Slack bots voor Costa Select — AI-makelaarassistenten voor Spaans vastgoed.
 
-## Wat doet deze bot?
+## Twee bots, één app
 
-```
-/zoekwoning nieuwbouw appartement in Estepona, 2 slaapkamers, budget 250k
-```
+| Bot | Commando | Wat het doet |
+|-----|----------|-------------|
+| **WoningBot** | `/zoekwoning` | On-demand woningzoeker: AI parsed je zoekopdracht, scraped 3 portals, selecteert top 10 met fotoanalyse |
+| **NieuwbouwBot** | `/nieuwbouw` | Nieuwbouw projecten-database: dagelijkse sync naar Google Sheet, stel vragen via Slack |
 
-1. **Claude AI** parsed de zoekopdracht → harde filters + zachte criteria
-2. **Apify** scraped Idealista, Fotocasa en Kyero parallel
-3. **Claude AI** selecteert de top 10 met motivatie per woning
-4. **Claude Vision** analyseert de hoofdfoto van elke geselecteerde woning
-5. **Slack** toont de resultaten met scores, motivaties en foto-analyse
-6. **Thread-verfijning**: reageer in de thread om de selectie aan te passen
+## WoningBot — `/zoekwoning`
 
-## Features
-
-- **3 portals**: Idealista + Fotocasa + Kyero parallel
-- **Nieuwbouw-detectie**: zoekt automatisch op resale + obra nueva als je "nieuwbouw" noemt
-- **Light fotoanalyse**: Claude Vision beoordeelt de hoofdfoto op staat, stijl en rode vlaggen
-- **Thread-verfijning**: "nr 4 en 7 zijn te gedateerd, vervang die" → bot selecteert vervangers + analyseert hun foto's
-- **50+ steden**: alle Costa Select regio's (Costa del Sol, Costa Blanca, Valencia)
-- **Deduplicatie**: dezelfde woning op meerdere portals wordt samengevoegd
-
-## Architectuur
+### Gebruik
 
 ```
-src/
-├── app.js                      # Slack Bolt entry point (Socket Mode)
-├── handlers/
-│   ├── zoekwoning.js           # /zoekwoning command handler
-│   └── thread-reply.js         # Thread feedback handler
-├── services/
-│   ├── claude-parser.js        # Tekst → harde filters + zachte criteria
-│   ├── claude-selector.js      # 30 woningen → top 10 met motivatie
-│   ├── claude-refiner.js       # Thread feedback → aangepaste selectie
-│   ├── claude-vision.js        # Foto-analyse via Claude Vision
-│   ├── idealista.js            # Apify Smart Idealista Scraper
-│   ├── fotocasa.js             # Apify Fotocasa Scraper
-│   ├── kyero.js                # Apify Kyero Scraper
-│   └── dedup.js                # Deduplicatie-logica
-├── formatters/
-│   └── slack-blocks.js         # Slack Block Kit message builder
-└── store/
-    └── thread-memory.js        # In-memory thread state
+/zoekwoning villa in Estepona of Mijas, budget 500-800k, 3 slaapkamers, zwembad, modern
 ```
 
-## Vereiste API Keys
+### Flow
+
+1. Claude parsed de tekst naar harde filters + zachte criteria
+2. Idealista, Fotocasa en Kyero worden parallel gescraped (incl. nieuwbouw als gevraagd)
+3. Claude selecteert de top 10 met motivatie per woning
+4. Claude Vision analyseert de hoofdfoto (staat, stijl, rode vlaggen)
+5. Resultaten verschijnen in Slack met progressieve updates
+6. Reageer in de thread om de selectie te verfijnen
+
+### Features
+
+- Multi-locatie: "Estepona of Mijas" of "Costa del Sol"
+- Nieuwbouw-detectie: automatisch obra nueva endpoint
+- Fotoanalyse: visuele beoordeling per woning
+- Thread-verfijning: "Vervang nr 3, te gedateerd"
+- Progressieve Slack-updates: live voortgang per stap
+
+## NieuwbouwBot — `/nieuwbouw`
+
+### Gebruik
+
+```
+/nieuwbouw Estepona, Marbella, Mijas
+/nieuwbouw welke projecten onder 300k met 2 slaapkamers aan de Costa del Sol?
+/nieuwbouw sync
+/nieuwbouw stats
+```
+
+### Commando's
+
+| Commando | Wat het doet |
+|----------|-------------|
+| `/nieuwbouw [locatie(s)]` | Toon alle actieve projecten in die steden |
+| `/nieuwbouw [vraag]` | Claude beantwoordt vragen over de projecten-database |
+| `/nieuwbouw sync` | Handmatig een database-sync triggeren |
+| `/nieuwbouw stats` | Statistieken: totaal projecten, per regio, per bron |
+
+### Dagelijkse sync
+
+De bot scraped automatisch elke dag om 06:00 CET alle nieuwbouwprojecten van Idealista, Fotocasa en Kyero voor alle Costa Select regio's (30+ steden). Resultaten worden geschreven naar een Google Sheet.
+
+### Google Sheet structuur
+
+| Kolom | Inhoud |
+|-------|--------|
+| Project Naam | Naam van het nieuwbouwproject |
+| Ontwikkelaar | Developer/promotor |
+| Regio | Costa del Sol, Costa Blanca North/South, Valencia |
+| Locatie | Stad |
+| Type | Appartement, villa, townhouse, etc. |
+| Prijs Vanaf / Tot | Prijsrange |
+| Slaapkamers | Aantal |
+| m² | Oppervlakte |
+| Beschrijving | Korte beschrijving |
+| URL | Link naar portal |
+| Bron | Idealista, Fotocasa, Kyero |
+| Features | Pool, terras, zeezicht, etc. |
+| Laatst/Eerst Gezien | Tracking data |
+| Status | Actief / Niet meer gezien |
+
+## Setup
+
+### Vereiste API Keys
 
 | Service | Variable | Waar te verkrijgen |
 |---------|----------|--------------------|
@@ -55,55 +87,86 @@ src/
 | Slack App Token | `SLACK_APP_TOKEN` | api.slack.com/apps → Basic Information → App-Level Tokens |
 | Anthropic (Claude) | `ANTHROPIC_API_KEY` | console.anthropic.com |
 | Apify | `APIFY_API_TOKEN` | console.apify.com → Settings → Integrations |
+| Google Sheets | `GOOGLE_SERVICE_ACCOUNT_JSON` | console.cloud.google.com → Service Accounts |
+| Google Sheet ID | `GOOGLE_SHEET_ID` | Uit de Sheet URL |
 
-## Installatie
+### Environment variables
 
-### Lokaal draaien
-
-```bash
-git clone https://github.com/thijs-ui/woningbot.git
-cd woningbot
-npm install
-cp .env.example .env
-# Vul de 4 API keys in .env
-npm start
 ```
+SLACK_BOT_TOKEN=xoxb-...
+SLACK_APP_TOKEN=xapp-...
+ANTHROPIC_API_KEY=sk-ant-...
+APIFY_API_TOKEN=apify_api_...
+GOOGLE_SERVICE_ACCOUNT_JSON={"type":"service_account",...}
+GOOGLE_SHEET_ID=11vn73aTrCUmSjLfyGhTFsyzoUDX_dX53gbn1_YGwlPo
+NIEUWBOUW_CRON_ENABLED=true
+NIEUWBOUW_CRON_HOUR=5
+```
+
+### Slack App configuratie
+
+Voeg deze toe aan je Slack App:
+
+1. **Slash Commands:**
+   - `/zoekwoning` — Beschrijving: "Zoek woningen in Spanje"
+   - `/nieuwbouw` — Beschrijving: "Zoek nieuwbouwprojecten in Spanje"
+
+2. **Event Subscriptions → Subscribe to bot events:**
+   - `message.channels`
+   - `message.groups`
+
+3. **OAuth Scopes:**
+   - `commands`, `chat:write`, `channels:history`, `groups:history`
 
 ### Deploy op Railway
 
 1. Push code naar GitHub
-2. Ga naar railway.app → New Project → Deploy from GitHub
-3. Selecteer de `woningbot` repo
-4. Voeg de 4 environment variables toe onder Variables
-5. Railway deployt automatisch
+2. Railway → New Project → Deploy from GitHub
+3. Stel alle environment variables in (inclusief Google Sheets)
+4. Railway deployt automatisch
 
-## Kosten per zoekopdracht
+### Handmatige sync
 
-| Stap | Kosten |
-|------|--------|
-| Claude Parser | ~$0.003 |
-| Apify (3 portals) | ~$0.35-0.50 |
-| Claude Selector | ~$0.06 |
-| Claude Vision (10 foto's) | ~$0.03 |
-| **Totaal** | **~$0.44-0.59** |
-| Thread-verfijning (per keer) | ~$0.10 |
+```bash
+node src/jobs/nieuwbouw-sync.js
+```
 
-## Slack App Configuratie
+## Architectuur
 
-Zorg dat je Slack App deze permissies heeft:
+```
+src/
+├── app.js                      # Entry point + cron scheduler
+├── handlers/
+│   ├── zoekwoning.js           # /zoekwoning command
+│   ├── nieuwbouw.js            # /nieuwbouw command
+│   └── thread-reply.js         # Thread verfijning
+├── services/
+│   ├── claude-parser.js        # Tekst → filters (Claude)
+│   ├── claude-selector.js      # 30 → top 10 (Claude)
+│   ├── claude-refiner.js       # Thread feedback (Claude)
+│   ├── claude-vision.js        # Fotoanalyse (Claude Vision)
+│   ├── idealista.js            # Apify Idealista scraper
+│   ├── fotocasa.js             # Apify Fotocasa scraper
+│   ├── kyero.js                # Apify Kyero scraper
+│   ├── nieuwbouw-scraper.js    # Batch scraper voor alle regio's
+│   ├── google-sheets.js        # Google Sheets API
+│   └── dedup.js                # URL-based deduplicatie
+├── formatters/
+│   └── slack-blocks.js         # Slack Block Kit berichten
+├── store/
+│   └── thread-memory.js        # Thread context (persistent)
+└── jobs/
+    └── nieuwbouw-sync.js       # Dagelijkse sync job
+```
 
-**Bot Token Scopes:**
-- `chat:write`
-- `commands`
-- `channels:history`
-- `groups:history`
+## Kosten (geschat)
 
-**Event Subscriptions (Socket Mode):**
-- `message.channels`
-- `message.groups`
-
-**Slash Commands:**
-- `/zoekwoning` — Beschrijving: "Zoek woningen in Spanje"
+| Onderdeel | Per zoekopdracht | Per dag (sync) | Per maand |
+|-----------|-----------------|----------------|-----------|
+| Claude AI | ~$0.07 | ~$0.10 | ~$5 |
+| Apify scrapers | ~$0.30 | ~$0.35 | ~$13 |
+| Railway | — | — | $5 |
+| **Totaal** | **~$0.37** | **~$0.45** | **~$23 + gebruik** |
 
 ## Ondersteunde steden
 
@@ -119,25 +182,13 @@ Jávea, Dénia, Moraira, Teulada, Calpe, Altea, Benidorm
 ### Valencia
 Valencia, Gandía
 
-## Changelog
+## Versiegeschiedenis
 
-### V2.1 (huidig)
-- Fotocasa integratie via `igolaizola/fotocasa-scraper`
-- Kyero integratie via `memo23/kyero-cheerio`
-- Nieuwbouw-detectie: dubbele scrape (resale + obra nueva)
-- Light fotoanalyse via Claude Vision
-- Foto-analyse ook bij thread-verfijning (vervangende woningen)
-- Status-updates in Slack tijdens het zoeken
-
-### V2.0
-- Initiële release met Idealista, Claude parsing, AI selectie, thread-verfijning
-
-## Toekomstige uitbreidingen
-
-- [ ] Custom Apify actors voor Lucas Fox, E&V, Resales Online
-- [ ] Deep fotoanalyse (meerdere foto's per woning)
-- [ ] Costa Select website integratie
-- [ ] Exporteer selectie naar Pipedrive
+- **V3.0** — NieuwbouwBot: Google Sheet database, dagelijkse sync, `/nieuwbouw` Q&A
+- **V2.2** — Multi-locatie, progressieve updates, thread persistence, locatie-verrijking
+- **V2.1** — Fotocasa, Kyero, nieuwbouw-fix, fotoanalyse
+- **V2.0** — WoningBot V2: 3-staps AI flow, thread-verfijning
+- **V1.0** — Eerste versie: Idealista + Claude
 
 ## Licentie
 
