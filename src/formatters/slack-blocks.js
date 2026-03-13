@@ -1,6 +1,7 @@
 /**
  * Slack Block Kit message builder for WoningBot V2.
  * Includes match scores, motivations, highlights, and photo analysis.
+ * Each property shows one link to its source portal.
  */
 
 const NUMBER_EMOJIS = ['1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣', '6️⃣', '7️⃣', '8️⃣', '9️⃣', '🔟'];
@@ -35,17 +36,71 @@ function getSourceLabel(source) {
 }
 
 /**
+ * Build a single property block (shared between results and refined).
+ */
+function buildPropertyBlock(sel, prop, index, photoAssessments) {
+  const emoji = NUMBER_EMOJIS[index] || `${index + 1}.`;
+  const assessment = photoAssessments
+    ? (photoAssessments instanceof Map
+        ? photoAssessments.get(sel.property_id) || photoAssessments.get(String(sel.property_id))
+        : photoAssessments[sel.property_id] || photoAssessments[String(sel.property_id)])
+    : null;
+
+  const title = prop?.title || 'Woning';
+  const truncTitle = title.length > 70 ? title.substring(0, 67) + '...' : title;
+  const price = prop?.price ? formatPrice(prop.price) : 'Prijs onbekend';
+
+  const details = [];
+  if (prop?.location) details.push(`📍 ${prop.location}`);
+  if (prop?.bedrooms) details.push(`🛏 ${prop.bedrooms} slpk`);
+  if (prop?.bathrooms) details.push(`🚿 ${prop.bathrooms} bdk`);
+  if (prop?.size_m2) details.push(`📏 ${prop.size_m2} m²`);
+  if (prop?.is_new_build) details.push('🆕 Nieuwbouw');
+
+  const stars = scoreToStars(sel.match_score);
+  const highlights = (sel.highlights || []).join(' • ');
+
+  // Photo analysis
+  let photoLine = '';
+  if (assessment) {
+    const condition = conditionToEmoji(assessment.condition_score);
+    const styleTags = (assessment.style_tags || []).join(', ');
+    photoLine = `\n   📸 *Foto-analyse:* ${condition}`;
+    if (styleTags) photoLine += ` — ${styleTags}`;
+    photoLine += `\n   ${assessment.visual_assessment || ''}`;
+    if (assessment.red_flags && assessment.red_flags.length > 0) {
+      photoLine += `\n   ⚠️ *Let op:* ${assessment.red_flags.join(', ')}`;
+    }
+  }
+
+  // Single link to source portal
+  let linkLine = '';
+  if (prop?.url) {
+    const domain = getSourceLabel(prop.source);
+    linkLine = `🔗 <${prop.url}|Bekijk op ${domain}>`;
+  }
+
+  let text = `${emoji}  *${truncTitle}* — *${price}*\n`;
+  if (details.length > 0) text += `   ${details.join('  •  ')}\n`;
+  text += `   Match: ${stars} (${sel.match_score}/100)\n\n`;
+  text += `   💬 *Waarom deze woning past:*\n   ${sel.motivation || ''}\n`;
+  if (photoLine) text += photoLine + '\n';
+  text += '\n';
+  if (highlights) text += `   ✨ ${highlights}\n\n`;
+  if (linkLine) text += `   ${linkLine}`;
+
+  return {
+    type: 'section',
+    text: { type: 'mrkdwn', text: text.trim() },
+  };
+}
+
+/**
  * Build the main results message blocks.
- * @param {Array} selections - Claude's selections
- * @param {Array} allProperties - All scraped properties
- * @param {object} clientProfile - The parsed client profile
- * @param {object} stats - { totalScraped, idealistaCount, fotocasaCount, kyeroCount }
- * @param {Map} photoAssessments - Map of property_id -> visual assessment (optional)
  */
 function buildResultBlocks(selections, allProperties, clientProfile, stats, photoAssessments) {
   const blocks = [];
 
-  // Header
   blocks.push({
     type: 'header',
     text: {
@@ -55,7 +110,6 @@ function buildResultBlocks(selections, allProperties, clientProfile, stats, phot
     },
   });
 
-  // Search summary + stats
   const summary = clientProfile.search_summary || 'Zoekopdracht';
   const sourcesParts = [];
   if (stats.idealistaCount > 0) sourcesParts.push(`Idealista (${stats.idealistaCount})`);
@@ -72,83 +126,13 @@ function buildResultBlocks(selections, allProperties, clientProfile, stats, phot
 
   blocks.push({ type: 'divider' });
 
-  // Each selected property
   for (let i = 0; i < selections.length; i++) {
     const sel = selections[i];
     const prop = findProperty(sel.property_id, allProperties);
-    const emoji = NUMBER_EMOJIS[i] || `${i + 1}.`;
-    const assessment = photoAssessments ? photoAssessments.get(sel.property_id) || photoAssessments.get(String(sel.property_id)) : null;
-
-    // Title + price
-    const title = prop?.title || 'Woning';
-    const truncTitle = title.length > 70 ? title.substring(0, 67) + '...' : title;
-    const price = prop?.price ? formatPrice(prop.price) : 'Prijs onbekend';
-
-    // Details line
-    const details = [];
-    if (prop?.location) details.push(`📍 ${prop.location}`);
-    if (prop?.bedrooms) details.push(`🛏 ${prop.bedrooms} slpk`);
-    if (prop?.bathrooms) details.push(`🚿 ${prop.bathrooms} bdk`);
-    if (prop?.size_m2) details.push(`📏 ${prop.size_m2} m²`);
-    if (prop?.is_new_build) details.push('🆕 Nieuwbouw');
-
-    // Match score
-    const stars = scoreToStars(sel.match_score);
-    const matchLine = `Match: ${stars} (${sel.match_score}/100)`;
-
-    // Motivation
-    const motivation = sel.motivation || '';
-
-    // Highlights
-    const highlights = (sel.highlights || []).join(' • ');
-
-    // Photo analysis
-    let photoLine = '';
-    if (assessment) {
-      const condition = conditionToEmoji(assessment.condition_score);
-      const styleTags = (assessment.style_tags || []).join(', ');
-      photoLine = `\n   📸 *Foto-analyse:* ${condition}`;
-      if (styleTags) photoLine += ` — ${styleTags}`;
-      photoLine += `\n   ${assessment.visual_assessment || ''}`;
-      if (assessment.red_flags && assessment.red_flags.length > 0) {
-        photoLine += `\n   ⚠️ *Let op:* ${assessment.red_flags.join(', ')}`;
-      }
-    }
-
-    // Links
-    const links = [];
-    if (prop?.url) {
-      const domain = getSourceLabel(prop.source);
-      links.push(`<${prop.url}|Bekijk op ${domain}>`);
-    }
-    if (prop?.alternateUrls) {
-      for (const alt of prop.alternateUrls) {
-        const d = getSourceLabel(alt.source);
-        links.push(`<${alt.url}|Ook op ${d}>`);
-      }
-    }
-
-    // Build text block
-    let text = `${emoji}  *${truncTitle}* — *${price}*\n`;
-    if (details.length > 0) text += `   ${details.join('  •  ')}\n`;
-    text += `   ${matchLine}\n\n`;
-    text += `   💬 *Waarom deze woning past:*\n   ${motivation}\n`;
-    if (photoLine) text += photoLine + '\n';
-    text += '\n';
-    if (highlights) text += `   ✨ ${highlights}\n\n`;
-    if (links.length > 0) text += `   🔗 ${links.join('  |  ')}`;
-
-    blocks.push({
-      type: 'section',
-      text: { type: 'mrkdwn', text: text.trim() },
-    });
-
-    if (i < selections.length - 1) {
-      blocks.push({ type: 'divider' });
-    }
+    blocks.push(buildPropertyBlock(sel, prop, i, photoAssessments));
+    if (i < selections.length - 1) blocks.push({ type: 'divider' });
   }
 
-  // Footer
   blocks.push({ type: 'divider' });
   blocks.push({
     type: 'context',
@@ -173,10 +157,6 @@ function findProperty(propertyId, allProperties) {
 
 /**
  * Build blocks for a refined selection (thread reply).
- * @param {Array} selections
- * @param {Array} allProperties
- * @param {string} responseText
- * @param {Map} photoAssessments - optional
  */
 function buildRefinedBlocks(selections, allProperties, responseText, photoAssessments) {
   const blocks = [];
@@ -203,72 +183,14 @@ function buildRefinedBlocks(selections, allProperties, responseText, photoAssess
   for (let i = 0; i < selections.length; i++) {
     const sel = selections[i];
     const prop = findProperty(sel.property_id, allProperties);
-    const emoji = NUMBER_EMOJIS[i] || `${i + 1}.`;
-    const assessment = photoAssessments ? photoAssessments.get(sel.property_id) || photoAssessments.get(String(sel.property_id)) : null;
-
-    const title = prop?.title || 'Woning';
-    const truncTitle = title.length > 70 ? title.substring(0, 67) + '...' : title;
-    const price = prop?.price ? formatPrice(prop.price) : 'Prijs onbekend';
-
-    const details = [];
-    if (prop?.location) details.push(`📍 ${prop.location}`);
-    if (prop?.bedrooms) details.push(`🛏 ${prop.bedrooms} slpk`);
-    if (prop?.bathrooms) details.push(`🚿 ${prop.bathrooms} bdk`);
-    if (prop?.size_m2) details.push(`📏 ${prop.size_m2} m²`);
-    if (prop?.is_new_build) details.push('🆕 Nieuwbouw');
-
-    const stars = scoreToStars(sel.match_score);
-    const highlights = (sel.highlights || []).join(' • ');
-
-    // Photo analysis
-    let photoLine = '';
-    if (assessment) {
-      const condition = conditionToEmoji(assessment.condition_score);
-      const styleTags = (assessment.style_tags || []).join(', ');
-      photoLine = `\n   📸 *Foto-analyse:* ${condition}`;
-      if (styleTags) photoLine += ` — ${styleTags}`;
-      photoLine += `\n   ${assessment.visual_assessment || ''}`;
-      if (assessment.red_flags && assessment.red_flags.length > 0) {
-        photoLine += `\n   ⚠️ *Let op:* ${assessment.red_flags.join(', ')}`;
-      }
-    }
-
-    const links = [];
-    if (prop?.url) {
-      const domain = getSourceLabel(prop.source);
-      links.push(`<${prop.url}|Bekijk op ${domain}>`);
-    }
-    if (prop?.alternateUrls) {
-      for (const alt of prop.alternateUrls) {
-        const d = getSourceLabel(alt.source);
-        links.push(`<${alt.url}|Ook op ${d}>`);
-      }
-    }
-
-    let text = `${emoji}  *${truncTitle}* — *${price}*\n`;
-    if (details.length > 0) text += `   ${details.join('  •  ')}\n`;
-    text += `   Match: ${stars} (${sel.match_score}/100)\n\n`;
-    text += `   💬 ${sel.motivation || ''}\n`;
-    if (photoLine) text += photoLine + '\n';
-    text += '\n';
-    if (highlights) text += `   ✨ ${highlights}\n\n`;
-    if (links.length > 0) text += `   🔗 ${links.join('  |  ')}`;
-
-    blocks.push({
-      type: 'section',
-      text: { type: 'mrkdwn', text: text.trim() },
-    });
-
+    blocks.push(buildPropertyBlock(sel, prop, i, photoAssessments));
     if (i < selections.length - 1) blocks.push({ type: 'divider' });
   }
 
   blocks.push({ type: 'divider' });
   blocks.push({
     type: 'context',
-    elements: [{
-      type: 'mrkdwn',
-      text: '💡 Reageer opnieuw in deze thread om verder te verfijnen.',
-    }],
+    elements: [{ type: 'mrkdwn', text: '💡 Reageer opnieuw in deze thread om verder te verfijnen.' }],
   });
 
   return blocks;
