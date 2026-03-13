@@ -1,14 +1,14 @@
 {
   "name": "woningbot",
-  "version": "2.0.0",
-  "description": "Slimme Slack bot voor Spaans vastgoed — AI-makelaarassistent met Claude parsing, Apify scraping, en intelligente selectie",
+  "version": "2.1.0",
+  "description": "Slimme Slack bot voor Spaans vastgoed — AI-makelaarassistent met Claude parsing, Apify scraping (Idealista + Fotocasa + Kyero), intelligente selectie, en fotoanalyse",
   "main": "src/app.js",
   "scripts": {
     "start": "node src/app.js",
     "dev": "node --watch src/app.js",
     "test": "node test.js"
   },
-  "keywords": ["slack", "bot", "real-estate", "spain", "idealista", "claude", "ai"],
+  "keywords": ["slack", "bot", "real-estate", "spain", "idealista", "fotocasa", "kyero", "claude", "ai", "vision"],
   "author": "Costa Select",
   "license": "MIT",
   "dependencies": {

@@ -1,142 +1,143 @@
-# WoningBot V2 — AI-makelaarassistent voor Slack
+# WoningBot V2.1 — AI Vastgoed-assistent voor Slack
 
-WoningBot is een Slack bot voor vastgoedkantoren in Spanje. Een consultant typt een zoekopdracht in natuurlijke taal, en de bot zoekt, analyseert en selecteert de beste woningen — inclusief motivatie per woning. Geen simpele scraper, maar een AI-assistent die begrijpt wat een klant zoekt, ook subjectieve wensen als "moderne maar warme stijl" of "Andalusische sfeer".
+Slimme Slack bot die Spaans vastgoed doorzoekt op **Idealista**, **Fotocasa** en **Kyero**, de beste matches selecteert met AI, en foto's analyseert — alles vanuit een simpel `/zoekwoning` commando.
 
-## Hoe het werkt
-
-```
-/zoekwoning mijn klant zoekt een vrijstaande villa in Estepona,
-budget tussen de €800.000 en €1.200.000, minimaal 3 slaapkamers,
-moderne maar warme stijl, ingegraven zwembad, liefst zeezicht.
-Geen urbanisatie, ze willen privacy.
-```
-
-**Stap 1 — Bevestig:** Direct antwoord in Slack ("Ik ga zoeken...").
-
-**Stap 2 — Parse:** Claude analyseert de tekst en splitst in harde filters (prijs, locatie, type) en zachte criteria (stijl, sfeer, dealbreakers).
-
-**Stap 3 — Scrape:** Apify doorzoekt Idealista met de harde filters. Levert circa 30 woningen op.
-
-**Stap 4 — Selecteer:** Claude leest elke woningbeschrijving en beoordeelt ze op de zachte criteria. Selecteert maximaal 10 beste matches met motivatie per woning.
-
-**Stap 5 — Presenteer:** Bot stuurt een geformateerd Slack-bericht met match-scores, motivaties en highlights.
-
-**Stap 6 — Verfijn:** De consultant reageert in de thread met feedback. De bot past de selectie aan zonder opnieuw te scrapen — tenzij de filters fundamenteel veranderen (bijv. hoger budget).
-
-## Technische stack
-
-| Component | Technologie |
-|---|---|
-| Runtime | Node.js 18+ |
-| Slack SDK | @slack/bolt (Socket Mode) |
-| AI | Anthropic Claude claude-sonnet-4-20250514 |
-| Scraping | Apify — Smart Idealista Scraper |
-| Hosting | Railway.app (of elke Node.js host) |
-
-## Projectstructuur
+## Wat doet deze bot?
 
 ```
-woningbot/
-├── src/
-│   ├── app.js                  ← Start Slack Bolt (Socket Mode)
-│   ├── handlers/
-│   │   ├── zoekwoning.js       ← /zoekwoning command handler
-│   │   └── thread-reply.js     ← Luistert naar thread replies
-│   ├── services/
-│   │   ├── claude-parser.js    ← Tekst → harde filters + zachte criteria
-│   │   ├── claude-selector.js  ← Woningen beoordelen + top 10
-│   │   ├── claude-refiner.js   ← Feedback verwerken + herselectie
-│   │   ├── idealista.js        ← Apify Smart Idealista Scraper
-│   │   ├── fotocasa.js         ← Fotocasa stub (toekomstige integratie)
-│   │   └── dedup.js            ← Deduplicatie logica
-│   ├── formatters/
-│   │   └── slack-blocks.js     ← Block Kit berichten bouwen
-│   └── store/
-│       └── thread-memory.js    ← In-memory opslag per thread
-├── package.json
-├── .env.example
-├── .gitignore
-└── README.md
+/zoekwoning nieuwbouw appartement in Estepona, 2 slaapkamers, budget 250k
 ```
 
-## Environment variables
+1. **Claude AI** parsed de zoekopdracht → harde filters + zachte criteria
+2. **Apify** scraped Idealista, Fotocasa en Kyero parallel
+3. **Claude AI** selecteert de top 10 met motivatie per woning
+4. **Claude Vision** analyseert de hoofdfoto van elke geselecteerde woning
+5. **Slack** toont de resultaten met scores, motivaties en foto-analyse
+6. **Thread-verfijning**: reageer in de thread om de selectie aan te passen
 
-```env
-SLACK_BOT_TOKEN=xoxb-...       # Slack Bot User OAuth Token
-SLACK_APP_TOKEN=xapp-...       # Slack App-Level Token (Socket Mode)
-ANTHROPIC_API_KEY=sk-ant-...   # Anthropic API key voor Claude
-APIFY_API_TOKEN=apify_api_...  # Apify API token
+## Features
+
+- **3 portals**: Idealista + Fotocasa + Kyero parallel
+- **Nieuwbouw-detectie**: zoekt automatisch op resale + obra nueva als je "nieuwbouw" noemt
+- **Light fotoanalyse**: Claude Vision beoordeelt de hoofdfoto op staat, stijl en rode vlaggen
+- **Thread-verfijning**: "nr 4 en 7 zijn te gedateerd, vervang die" → bot selecteert vervangers + analyseert hun foto's
+- **50+ steden**: alle Costa Select regio's (Costa del Sol, Costa Blanca, Valencia)
+- **Deduplicatie**: dezelfde woning op meerdere portals wordt samengevoegd
+
+## Architectuur
+
+```
+src/
+├── app.js                      # Slack Bolt entry point (Socket Mode)
+├── handlers/
+│   ├── zoekwoning.js           # /zoekwoning command handler
+│   └── thread-reply.js         # Thread feedback handler
+├── services/
+│   ├── claude-parser.js        # Tekst → harde filters + zachte criteria
+│   ├── claude-selector.js      # 30 woningen → top 10 met motivatie
+│   ├── claude-refiner.js       # Thread feedback → aangepaste selectie
+│   ├── claude-vision.js        # Foto-analyse via Claude Vision
+│   ├── idealista.js            # Apify Smart Idealista Scraper
+│   ├── fotocasa.js             # Apify Fotocasa Scraper
+│   ├── kyero.js                # Apify Kyero Scraper
+│   └── dedup.js                # Deduplicatie-logica
+├── formatters/
+│   └── slack-blocks.js         # Slack Block Kit message builder
+└── store/
+    └── thread-memory.js        # In-memory thread state
 ```
 
-## Installatie en lokaal draaien
+## Vereiste API Keys
+
+| Service | Variable | Waar te verkrijgen |
+|---------|----------|--------------------|
+| Slack Bot Token | `SLACK_BOT_TOKEN` | api.slack.com/apps |
+| Slack App Token | `SLACK_APP_TOKEN` | api.slack.com/apps → Basic Information → App-Level Tokens |
+| Anthropic (Claude) | `ANTHROPIC_API_KEY` | console.anthropic.com |
+| Apify | `APIFY_API_TOKEN` | console.apify.com → Settings → Integrations |
+
+## Installatie
+
+### Lokaal draaien
 
 ```bash
-git clone https://github.com/YOUR_USER/woningbot.git
+git clone https://github.com/thijs-ui/woningbot.git
 cd woningbot
 npm install
 cp .env.example .env
-# Vul de .env met je echte API keys
+# Vul de 4 API keys in .env
 npm start
 ```
 
-## Deploy op Railway.app
+### Deploy op Railway
 
-1. Push de code naar een GitHub repository.
-2. Ga naar [railway.app](https://railway.app) en maak een nieuw project.
-3. Koppel de GitHub repo.
-4. Stel de environment variables in (zie hierboven).
-5. Railway detecteert automatisch Node.js en draait `npm start`.
-6. Socket Mode = geen publieke URL nodig.
-
-## Slack App configuratie
-
-De bot vereist een Slack App met de volgende instellingen:
-
-**Socket Mode:** Ingeschakeld (App-Level Token met `connections:write` scope).
-
-**Bot Token Scopes:** `chat:write`, `commands`.
-
-**Event Subscriptions:** `message.channels`, `message.groups`.
-
-**Slash Commands:** `/zoekwoning` — beschrijving: "Zoek woningen voor je klant".
-
-## Ondersteunde locaties
-
-De bot heeft verified Idealista location IDs voor 50+ Spaanse steden, waaronder alle Costa Select regio's.
-
-| Regio | Steden |
-|---|---|
-| Costa del Sol | Estepona, Marbella, Malaga, Fuengirola, Mijas, Benalmadena, Torremolinos, Nerja, Manilva, Casares, Benahavis, Sotogrande, Rincon, Velez-Malaga, Torrox |
-| Costa Blanca Zuid | Torrevieja, Orihuela, Guardamar, Rojales, Pilar de la Horadada, Santa Pola, Elche, Alicante, Murcia, Cartagena |
-| Costa Blanca Noord | Javea, Denia, Moraira, Calpe, Altea, Benidorm |
-| Valencia | Valencia, Gandia |
-| Inland Malaga | Ronda, Antequera, Coin, Alhaurin el Grande |
-| Grote steden | Madrid, Barcelona, Sevilla, Granada, Cadiz, Almeria, Palma, Ibiza |
-
-Locaties die niet in de mapping staan worden doorgegeven als `locationName` (fallback).
-
-## Fotocasa integratie
-
-Fotocasa is voorbereid als stub. De handler roept `searchFotocasa()` al parallel aan Idealista aan. Om Fotocasa te activeren:
-
-1. Kies een betrouwbare Apify actor (bijv. `igolaizola/fotocasa-scraper`).
-2. Implementeer de scrape-logica in `src/services/fotocasa.js`.
-3. Normaliseer de output naar hetzelfde format als Idealista.
-4. De rest van de pipeline (dedup, selectie, formatting) werkt automatisch.
+1. Push code naar GitHub
+2. Ga naar railway.app → New Project → Deploy from GitHub
+3. Selecteer de `woningbot` repo
+4. Voeg de 4 environment variables toe onder Variables
+5. Railway deployt automatisch
 
 ## Kosten per zoekopdracht
 
-| Component | Geschatte kosten |
-|---|---|
-| Claude parser | circa $0.003 |
-| Claude selector | circa $0.02 |
-| Claude refiner (per thread-reply) | circa $0.02 |
-| Apify Idealista (2 pagina's) | circa $0.25 |
-| **Totaal per zoekopdracht** | **circa $0.28** |
+| Stap | Kosten |
+|------|--------|
+| Claude Parser | ~$0.003 |
+| Apify (3 portals) | ~$0.35-0.50 |
+| Claude Selector | ~$0.06 |
+| Claude Vision (10 foto's) | ~$0.03 |
+| **Totaal** | **~$0.44-0.59** |
+| Thread-verfijning (per keer) | ~$0.10 |
 
-## Error handling
+## Slack App Configuratie
 
-De bot handelt de volgende foutscenario's af: Claude geeft geen geldige JSON (1x retry, daarna foutmelding), Apify timeout of error (meldt welke portal faalde, toont resultaten van werkende portal), 0 resultaten na scraping (melding met suggestie om criteria te verbreden), 0 resultaten na AI-selectie (melding dat geen woningen goed genoeg matchen), en Slack-berichten die te lang zijn (automatisch gesplitst in chunks van max 45 blocks).
+Zorg dat je Slack App deze permissies heeft:
+
+**Bot Token Scopes:**
+- `chat:write`
+- `commands`
+- `channels:history`
+- `groups:history`
+
+**Event Subscriptions (Socket Mode):**
+- `message.channels`
+- `message.groups`
+
+**Slash Commands:**
+- `/zoekwoning` — Beschrijving: "Zoek woningen in Spanje"
+
+## Ondersteunde steden
+
+### Costa del Sol
+Estepona, Marbella, Málaga, Fuengirola, Mijas, Benalmádena, Torremolinos, Nerja, Manilva, Casares, Benahavís, Rincón de la Victoria, Vélez-Málaga, Torrox, Ronda, Antequera, Coín, Alhaurín el Grande
+
+### Costa Blanca South
+Torrevieja, Orihuela (Costa), Guardamar del Segura, Rojales, Pilar de la Horadada, Santa Pola, Alicante, Elche
+
+### Costa Blanca North
+Jávea, Dénia, Moraira, Teulada, Calpe, Altea, Benidorm
+
+### Valencia
+Valencia, Gandía
+
+## Changelog
+
+### V2.1 (huidig)
+- Fotocasa integratie via `igolaizola/fotocasa-scraper`
+- Kyero integratie via `memo23/kyero-cheerio`
+- Nieuwbouw-detectie: dubbele scrape (resale + obra nueva)
+- Light fotoanalyse via Claude Vision
+- Foto-analyse ook bij thread-verfijning (vervangende woningen)
+- Status-updates in Slack tijdens het zoeken
+
+### V2.0
+- Initiële release met Idealista, Claude parsing, AI selectie, thread-verfijning
+
+## Toekomstige uitbreidingen
+
+- [ ] Custom Apify actors voor Lucas Fox, E&V, Resales Online
+- [ ] Deep fotoanalyse (meerdere foto's per woning)
+- [ ] Costa Select website integratie
+- [ ] Exporteer selectie naar Pipedrive
 
 ## Licentie
 
