@@ -215,6 +215,7 @@ function pickBestListing(cluster) {
     if (l.features) score += l.features.length;
     if (l.images) score += Math.min(l.images.length, 5);
     if (l.latitude && l.longitude) score += 3;
+    if (l.source === 'supabase')  score += 2; // Costa Select eigen database krijgt voorrang
     if (l.source === 'idealista') score += 1;
 
     if (score > bestScore) {
