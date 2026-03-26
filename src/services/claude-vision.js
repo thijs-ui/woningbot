@@ -5,8 +5,9 @@ const { claudeRetry } = require('./claude-retry');
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-// Fix #16: Configurable model
-const CLAUDE_MODEL = process.env.CLAUDE_MODEL || 'claude-sonnet-4-20250514';
+// Vision gebruikt Haiku: goedkoper, sneller en hogere rate limits.
+// Overschrijfbaar via CLAUDE_VISION_MODEL env var.
+const CLAUDE_MODEL = process.env.CLAUDE_VISION_MODEL || 'claude-haiku-4-5-20251001';
 
 const SYSTEM_PROMPT = `Je bent een vastgoedexpert die foto's van woningen beoordeelt. Je krijgt de hoofdfoto (thumbnail) van een woning, samen met de basisgegevens.
 
