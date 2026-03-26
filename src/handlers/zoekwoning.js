@@ -2,6 +2,7 @@ const { parseSearchQuery } = require('../services/claude-parser');
 const { selectProperties } = require('../services/claude-selector');
 const { searchIdealista, enrichListingsWithDetails } = require('../services/idealista-direct');
 // const { searchThinkSpain } = require('../services/thinkspain');  // Temporarily disabled
+const { searchSupabase } = require('../services/supabase-search');
 const { analyzeSelectedPhotos } = require('../services/claude-vision');
 const { deduplicateListings } = require('../services/dedup');
 const { preFilterListings, postValidateSelections, filterThinkSpainByType } = require('../services/property-filter');
@@ -94,39 +95,48 @@ async function handleZoekwoning({ command, ack, respond, client }) {
     await updateStatus(client, channelId, threadTs,
       `:white_check_mark: *Begrepen:* ${clientProfile.search_summary || queryText}\n` +
       `:round_pushpin: Locatie(s): ${locationStr}${neighborhoods.length > 0 ? ` (wijken: ${neighborhoods.join(', ')})` : ''}${isNewBuild ? ' (incl. nieuwbouw)' : ''}\n\n` +
-      `:mag: *Stap 2/6* — Zoeken op Idealista...`);
+      `:mag: *Stap 2/6* — Zoeken op Idealista en Costa Select database...`);
 
     // ─── Step 3: Scrape all portals in parallel ────────────────────────
     console.log(`[${ts}] [ZoekWoning] Scraping portals for ${locationStr}...`);
 
     const errors = [];
 
-    let idealistaListings = [];
-    try {
-      idealistaListings = await searchIdealista(hardFilters);
-    } catch (err) {
-      errors.push('Idealista');
-      console.error(`[${ts}] Idealista failed:`, err.message);
-      if (err.message?.includes('401') || err.message?.includes('403')) {
-        errors.push('(ScraperAPI key ongeldig?)');
+    const [idealistaListings, supabaseListings] = await Promise.allSettled([
+      searchIdealista(hardFilters),
+      searchSupabase(hardFilters),
+    ]).then(([idealista, supabase]) => {
+      const idealistaResult = idealista.status === 'fulfilled' ? idealista.value : [];
+      const supabaseResult  = supabase.status  === 'fulfilled' ? supabase.value  : [];
+
+      if (idealista.status === 'rejected') {
+        errors.push('Idealista');
+        console.error(`[${ts}] Idealista failed:`, idealista.reason?.message);
       }
-    }
+      if (supabase.status === 'rejected') {
+        errors.push('Costa Select database');
+        console.error(`[${ts}] Supabase failed:`, supabase.reason?.message);
+      }
+
+      return [idealistaResult, supabaseResult];
+    });
 
     // ThinkSpain temporarily disabled
     const thinkspainListings = [];
 
     // Combine and deduplicate
-    const allRaw = [...idealistaListings, ...thinkspainListings];
+    const allRaw = [...idealistaListings, ...supabaseListings, ...thinkspainListings];
 
     const stats = {
-      totalScraped: allRaw.length,
+      totalScraped:   allRaw.length,
       idealistaCount: idealistaListings.length,
+      supabaseCount:  supabaseListings.length,
       thinkspainCount: thinkspainListings.length,
     };
 
     await updateStatus(client, channelId, threadTs,
       `:white_check_mark: *Stap 2/6 klaar* — ${allRaw.length} woningen gevonden\n` +
-      `Idealista: ${stats.idealistaCount}\n\n` +
+      `Idealista: ${stats.idealistaCount} | Costa Select: ${stats.supabaseCount}\n\n` +
       (errors.length > 0 ? `:warning: ${errors.join(' en ')} gaf een fout\n\n` : '') +
       `:broom: *Stap 3/6* — Duplicaten verwijderen en filteren...`);
 
