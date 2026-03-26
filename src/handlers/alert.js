@@ -42,15 +42,12 @@ Voorbeelden:
 // ─── Parse alert query with Claude ─────────────────────────────────────────
 
 async function parseAlertQuery(text) {
-  const response = await claudeRetry(() =>
-    claude.messages.create({
-      model: CLAUDE_MODEL,
-      max_tokens: 300,
-      system: PARSE_PROMPT,
-      messages: [{ role: 'user', content: text }],
-    }),
-    'AlertParser'
-  );
+  const response = await claudeRetry(claude, {
+    model: CLAUDE_MODEL,
+    max_tokens: 300,
+    system: PARSE_PROMPT,
+    messages: [{ role: 'user', content: text }],
+  }, { label: 'AlertParser' });
   const raw = response.content[0].text.trim();
   const match = raw.match(/\{[\s\S]*\}/);
   if (!match) throw new Error('Geen JSON in Claude response');
