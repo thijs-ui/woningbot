@@ -209,6 +209,47 @@ async function getNewUnitsForAlert(alert) {
   return units;
 }
 
+/**
+ * Find new resales properties that match an alert's criteria.
+ * Checks resales_properties added since the alert was last checked.
+ */
+async function getNewResalesForAlert(alert) {
+  const cutoff = alert.last_checked_at
+    ? new Date(alert.last_checked_at).toISOString()
+    : new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString();
+
+  const params = {
+    select: 'ref,price,currency,property_type,town,province,beds,baths,built_m2,pool,new_build,features,desc_nl,desc_en,images,first_seen_at',
+    first_seen_at: `gte.${cutoff}`,
+    price_freq:    'eq.sale',
+    order:         'price.asc',
+    limit:         '50',
+  };
+
+  if (alert.min_price) params['price'] = `gte.${alert.min_price}`;
+  if (alert.max_price) params['price'] = `lte.${alert.max_price}`;
+  if (alert.min_rooms) params['beds']  = `gte.${alert.min_rooms}`;
+  if (alert.min_size_m2) params['built_m2'] = `gte.${alert.min_size_m2}`;
+  if (alert.has_pool === true) params['pool'] = 'eq.true';
+
+  const result = await sbRequest('GET', 'resales_properties', null, params);
+  if (result.status >= 400) return [];
+
+  let properties = result.data || [];
+
+  // Post-filter op locatie
+  if (alert.location) {
+    const loc = alert.location.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+    properties = properties.filter(p => {
+      const town     = (p.town     || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+      const province = (p.province || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+      return town.includes(loc) || loc.includes(town) || province.includes(loc);
+    });
+  }
+
+  return properties;
+}
+
 module.exports = {
   saveAlert,
   getActiveAlerts,
@@ -216,5 +257,6 @@ module.exports = {
   deactivateAlert,
   updateLastChecked,
   getNewUnitsForAlert,
+  getNewResalesForAlert,
   MAX_ALERTS_PER_USER,
 };

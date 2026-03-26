@@ -2,7 +2,7 @@
 // Runs daily to check all active alerts for new matching units
 // Sends DM notifications to users when matches are found
 
-const { getActiveAlerts, getNewUnitsForAlert, updateLastChecked } = require('../services/alert-service');
+const { getActiveAlerts, getNewUnitsForAlert, getNewResalesForAlert, updateLastChecked } = require('../services/alert-service');
 
 // Rate limit: wait between DMs to avoid Slack rate limits
 const DM_DELAY_MS = 1500;
@@ -41,23 +41,36 @@ async function runAlertCheck(app) {
     const shortId = alert.id.slice(0, 8);
 
     try {
-      const newUnits = await getNewUnitsForAlert(alert);
-      console.log(`[${ts}] [AlertCheck] Alert ${shortId} (${alert.location || 'any'}): ${newUnits.length} new matches`);
+      const [newUnits, newResales] = await Promise.all([
+        getNewUnitsForAlert(alert),
+        getNewResalesForAlert(alert),
+      ]);
+
+      console.log(`[${ts}] [AlertCheck] Alert ${shortId} (${alert.location || 'any'}): ${newUnits.length} nieuwbouw, ${newResales.length} resales`);
 
       if (newUnits.length > 0) {
         totalMatches += newUnits.length;
-
         try {
           await sendNotification(app, alert, newUnits);
           totalNotified++;
-          console.log(`[${ts}] [AlertCheck] Notification sent for alert ${shortId}`);
+          console.log(`[${ts}] [AlertCheck] Nieuwbouw notificatie verstuurd voor alert ${shortId}`);
         } catch (dmErr) {
           totalErrors++;
-          // DM might fail if user has DMs disabled — log but don't crash
           console.error(`[${ts}] [AlertCheck] Failed to send DM for alert ${shortId}:`, dmErr.message);
         }
+        await sleep(DM_DELAY_MS);
+      }
 
-        // Rate limit between DMs
+      if (newResales.length > 0) {
+        totalMatches += newResales.length;
+        try {
+          await sendResalesNotification(app, alert, newResales);
+          totalNotified++;
+          console.log(`[${ts}] [AlertCheck] Resales notificatie verstuurd voor alert ${shortId}`);
+        } catch (dmErr) {
+          totalErrors++;
+          console.error(`[${ts}] [AlertCheck] Failed to send resales DM for alert ${shortId}:`, dmErr.message);
+        }
         await sleep(DM_DELAY_MS);
       }
 
@@ -159,6 +172,84 @@ async function sendNotification(app, alert, units) {
     channel: alert.slack_user_id, // DM to user
     blocks,
     text: `🔔 ${count} nieuwe listing${count > 1 ? 's' : ''} matchen met jouw alert (${filterText})`,
+  });
+}
+
+/**
+ * Send a DM notification for new Costa Select resales properties.
+ */
+async function sendResalesNotification(app, alert, properties) {
+  const count = properties.length;
+  const preview = properties.slice(0, 5);
+
+  const filterParts = [];
+  if (alert.location) filterParts.push(alert.location);
+  if (alert.max_price) filterParts.push(`max €${Number(alert.max_price).toLocaleString('nl-NL')}`);
+  if (alert.min_rooms) filterParts.push(`${alert.min_rooms}+ slpk`);
+  const filterText = filterParts.length > 0 ? filterParts.join(', ') : 'alle criteria';
+
+  const blocks = [
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: `🔔 *${count} nieuwe Costa Select listing${count > 1 ? 's' : ''} gevonden*\n_Alert: ${filterText}_`,
+      },
+    },
+    { type: 'divider' },
+  ];
+
+  for (const p of preview) {
+    const images = (p.images || []).map(img => img?.url).filter(Boolean);
+    const thumbnail = images[0] || null;
+    const desc = (p.desc_nl || p.desc_en || '').substring(0, 120);
+
+    const textLines = [
+      `*${p.property_type || 'Property'} in ${p.town || p.province || '?'}*`,
+      `📍 ${[p.town, p.province].filter(Boolean).join(', ')}`,
+      `💶 €${Number(p.price || 0).toLocaleString('nl-NL')}  🛏 ${p.beds || '?'} slpk  📐 ${p.built_m2 || '?'}m²`,
+      p.pool ? '🏊 Zwembad' : '',
+      desc ? `_${desc}..._` : '',
+    ].filter(Boolean);
+
+    const sectionBlock = {
+      type: 'section',
+      text: { type: 'mrkdwn', text: textLines.join('\n') },
+    };
+
+    if (thumbnail) {
+      sectionBlock.accessory = {
+        type: 'image',
+        image_url: thumbnail,
+        alt_text: `${p.property_type || 'Property'} in ${p.town || '?'}`,
+      };
+    }
+
+    blocks.push(sectionBlock);
+  }
+
+  if (count > 5) {
+    blocks.push({
+      type: 'context',
+      elements: [{
+        type: 'mrkdwn',
+        text: `_... en nog ${count - 5} meer. Gebruik \`/zoekwoning\` voor een volledig overzicht._`,
+      }],
+    });
+  }
+
+  blocks.push({
+    type: 'context',
+    elements: [{
+      type: 'mrkdwn',
+      text: `_Alert ID: \`${alert.id.slice(0, 8)}\` · Stop met \`/alert stop ${alert.id.slice(0, 8)}\`_`,
+    }],
+  });
+
+  await app.client.chat.postMessage({
+    channel: alert.slack_user_id,
+    blocks,
+    text: `🔔 ${count} nieuwe Costa Select listing${count > 1 ? 's' : ''} matchen met jouw alert (${filterText})`,
   });
 }
 
