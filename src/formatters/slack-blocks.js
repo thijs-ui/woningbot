@@ -112,6 +112,7 @@ function buildResultBlocks(selections, allProperties, clientProfile, stats, phot
   const summary = clientProfile.search_summary || 'Zoekopdracht';
   const sourcesParts = [];
   if (stats.idealistaCount > 0) sourcesParts.push(`Idealista (${stats.idealistaCount})`);
+  if (stats.supabaseCount  > 0) sourcesParts.push(`Costa Select (${stats.supabaseCount})`);
   if (stats.thinkspainCount > 0) sourcesParts.push(`ThinkSpain (${stats.thinkspainCount})`);
 
   blocks.push({
