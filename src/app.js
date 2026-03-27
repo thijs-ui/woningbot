@@ -10,6 +10,7 @@ const { handlePrijs } = require('./handlers/prijs');
 const { handleAlert, handleStopAlertAction } = require('./handlers/alert');
 const { handleSave } = require('./handlers/save');
 const { handleVergelijk } = require('./handlers/vergelijk');
+const { handlePitch } = require('./handlers/pitch');
 const { handleKlant, handleRemoveClientProperty } = require('./handlers/klant');
 const { runAlertCheck } = require('./jobs/alert-check');
 
@@ -27,6 +28,7 @@ app.command('/prijs', handlePrijs);
 app.command('/alert', handleAlert);
 app.command('/save', handleSave);
 app.command('/vergelijk', handleVergelijk);
+app.command('/pitch', handlePitch);
 app.command('/klant', handleKlant);
 
 // Register Slack action handlers (interactive buttons)
@@ -59,7 +61,7 @@ app.error(async (error) => {
   await app.start();
   console.log('⚡ WoningBot V2 is running in Socket Mode!');
   console.log('📌 Portals: Idealista (custom scraper) + Supabase (nieuwbouw DB + E&V prices)');
-  console.log('📌 Commands: /zoekwoning, /nieuwbouw, /project, /prijs, /alert, /save, /klant, /vergelijk');
+  console.log('📌 Commands: /zoekwoning, /nieuwbouw, /project, /prijs, /alert, /save, /klant, /vergelijk, /pitch');
 
   // Daily alert check at 07:00 UTC (08:00 CET / 09:00 CEST)
   cron.schedule('0 7 * * *', () => {
