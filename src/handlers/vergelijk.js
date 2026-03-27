@@ -91,6 +91,8 @@ async function lookupIdealista(url) {
   console.log(`[Vergelijk] Idealista dataset items: ${items?.length ?? 0}`);
   const item = items?.[0];
   if (!item) return null;
+  console.log(`[Vergelijk] Idealista item keys: ${Object.keys(item).join(', ')}`);
+  console.log(`[Vergelijk] Idealista item sample: price=${item.price}, municipality=${item.municipality}, rooms=${item.rooms}, size=${item.size}, url=${item.url}`);
 
   const get = (dotKey) => {
     if (item[dotKey] !== undefined) return item[dotKey];
