@@ -95,6 +95,8 @@ async function lookupIdealista(url) {
   // When using propertyCodes, all data is nested under _details
   const d = item._details || item;
   console.log(`[Vergelijk] Idealista _details keys: ${Object.keys(d).join(', ')}`);
+  console.log(`[Vergelijk] Idealista ubication: ${JSON.stringify(d.ubication)}`);
+  console.log(`[Vergelijk] Idealista moreCharacteristics: ${JSON.stringify(d.moreCharacteristics)}`);
 
   const get = (obj, dotKey) => {
     if (obj[dotKey] !== undefined) return obj[dotKey];
