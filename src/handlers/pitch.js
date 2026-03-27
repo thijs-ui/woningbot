@@ -6,6 +6,7 @@
 const Anthropic = require('@anthropic-ai/sdk');
 const { claudeRetry } = require('../services/claude-retry');
 const { getClientProperties } = require('../services/client-service');
+const { scrapeCostaSelectPage } = require('../services/costaselect-scraper');
 
 const claude = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 const CLAUDE_MODEL = process.env.CLAUDE_MODEL || 'claude-sonnet-4-20250514';
@@ -32,7 +33,7 @@ async function resolveProperty(input) {
     );
     if (rows?.[0]) return rows[0];
 
-    // Costa Select: haal ref op van de pagina
+    // Costa Select: probeer ref te extraheren en in Supabase op te zoeken
     if (input.includes('costaselect.com')) {
       try {
         const res = await fetch(input, {
@@ -46,6 +47,10 @@ async function resolveProperty(input) {
           );
           if (rows2?.[0]) return rows2[0];
         }
+      } catch { /* ignore */ }
+      // Fallback: scrape de pagina direct
+      try {
+        return await scrapeCostaSelectPage(input);
       } catch { /* ignore */ }
     }
     return null;

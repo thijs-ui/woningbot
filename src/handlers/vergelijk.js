@@ -6,6 +6,7 @@ const Anthropic = require('@anthropic-ai/sdk');
 const { ApifyClient } = require('apify-client');
 const { claudeRetry } = require('../services/claude-retry');
 const { lookupProperty } = require('../services/client-service');
+const { scrapeCostaSelectPage } = require('../services/costaselect-scraper');
 
 const APIFY_TOKEN = process.env.APIFY_API_TOKEN || process.env.APIFY_TOKEN || '';
 const IDEALISTA_ACTOR_ID = 'igolaizola/idealista-scraper';
@@ -60,6 +61,10 @@ async function lookupByUrl(url) {
     } catch {
       // Pagina ophalen mislukt, verder met null
     }
+    // Fallback: scrape de pagina direct
+    try {
+      return await scrapeCostaSelectPage(url);
+    } catch { /* ignore */ }
   }
 
   return null;
