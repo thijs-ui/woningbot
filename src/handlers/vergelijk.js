@@ -115,23 +115,25 @@ async function lookupIdealista(url) {
   if (!features.includes('pool') && (desc.includes('piscina') || desc.includes('pool'))) features.push('pool');
 
   const price = d.price || get(d, 'priceInfo.price.amount') || null;
-  const itemUrl = d.url || `https://www.idealista.com/inmueble/${propertyCode}/`;
+  const ubication = d.ubication || {};
+  const chars = d.moreCharacteristics || {};
+  const itemUrl = get(d, 'detailWebLink') || get(d, 'link') || `https://www.idealista.com/inmueble/${propertyCode}/`;
 
   return {
     ref:           propertyCode,
     url:           itemUrl,
     price,
     property_type: d.propertyType || null,
-    town:          d.municipality || d.town || null,
-    province:      d.province || null,
-    beds:          d.rooms || d.bedrooms || null,
-    baths:         d.bathrooms || null,
-    built_m2:      d.size || d.constructedArea || null,
-    plot_m2:       d.plotSize || null,
+    town:          ubication.municipality || ubication.town || null,
+    province:      ubication.province || ubication.countyName || null,
+    beds:          chars.roomNumber ?? null,
+    baths:         chars.bathNumber ?? null,
+    built_m2:      chars.constructedArea || chars.builtArea || null,
+    plot_m2:       chars.plotArea || chars.groundPlotArea || null,
     pool:          features.includes('pool') || null,
-    new_build:     d.newDevelopment || null,
+    new_build:     d.newDevelopment || (d.state === 'newDevelopment') || null,
     features,
-    desc_en:       d.description || d.propertyComment || null,
+    desc_en:       d.propertyComment || null,
     desc_nl:       null,
   };
 }
