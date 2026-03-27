@@ -91,42 +91,47 @@ async function lookupIdealista(url) {
   console.log(`[Vergelijk] Idealista dataset items: ${items?.length ?? 0}`);
   const item = items?.[0];
   if (!item) return null;
-  console.log(`[Vergelijk] Idealista item keys: ${Object.keys(item).join(', ')}`);
-  console.log(`[Vergelijk] Idealista item sample: price=${item.price}, municipality=${item.municipality}, rooms=${item.rooms}, size=${item.size}, url=${item.url}`);
 
-  const get = (dotKey) => {
-    if (item[dotKey] !== undefined) return item[dotKey];
+  // When using propertyCodes, all data is nested under _details
+  const d = item._details || item;
+  console.log(`[Vergelijk] Idealista _details keys: ${Object.keys(d).join(', ')}`);
+
+  const get = (obj, dotKey) => {
+    if (obj[dotKey] !== undefined) return obj[dotKey];
     const parts = dotKey.split('.');
-    let val = item;
+    let val = obj;
     for (const p of parts) { if (val == null) return null; val = val[p]; }
     return val ?? null;
   };
 
   const features = [];
-  if (get('features.hasSwimmingPool')) features.push('pool');
-  if (get('features.hasGarden')) features.push('garden');
-  if (get('features.hasTerrace')) features.push('terrace');
-  if (get('features.hasAirConditioning')) features.push('air_conditioning');
-  if (item.hasLift) features.push('elevator');
-  if (get('parkingSpace.hasParkingSpace')) features.push('garage');
-  const desc = (item.description || '').toLowerCase();
+  if (get(d, 'features.hasSwimmingPool')) features.push('pool');
+  if (get(d, 'features.hasGarden')) features.push('garden');
+  if (get(d, 'features.hasTerrace')) features.push('terrace');
+  if (get(d, 'features.hasAirConditioning')) features.push('air_conditioning');
+  if (d.hasLift) features.push('elevator');
+  if (get(d, 'parkingSpace.hasParkingSpace')) features.push('garage');
+  const desc = (d.description || d.propertyComment || '').toLowerCase();
   if (!features.includes('pool') && (desc.includes('piscina') || desc.includes('pool'))) features.push('pool');
+
+  const price = d.price || get(d, 'priceInfo.price.amount') || null;
+  const itemUrl = d.url || `https://www.idealista.com/inmueble/${propertyCode}/`;
 
   return {
     ref:           propertyCode,
-    url:           item.url || url,
-    price:         item.price || get('priceInfo.price.amount') || null,
-    property_type: item.propertyType || null,
-    town:          item.municipality || null,
-    province:      item.province || null,
-    beds:          item.rooms || null,
-    baths:         item.bathrooms || null,
-    built_m2:      item.size || null,
-    plot_m2:       item.plotSize || null,
+    url:           itemUrl,
+    price,
+    property_type: d.propertyType || null,
+    town:          d.municipality || d.town || null,
+    province:      d.province || null,
+    beds:          d.rooms || d.bedrooms || null,
+    baths:         d.bathrooms || null,
+    built_m2:      d.size || d.constructedArea || null,
+    plot_m2:       d.plotSize || null,
     pool:          features.includes('pool') || null,
-    new_build:     item.newDevelopment || null,
+    new_build:     d.newDevelopment || null,
     features,
-    desc_en:       item.description || null,
+    desc_en:       d.description || d.propertyComment || null,
     desc_nl:       null,
   };
 }
