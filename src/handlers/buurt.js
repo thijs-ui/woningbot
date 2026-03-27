@@ -1,11 +1,14 @@
 // ─── /buurt handler ─────────────────────────────────────────────────────────
 // Gebruik: /buurt Jávea
-//          /buurt Nueva Andalucia
+//          /buurt 771846               (property → buurt auto-detect)
+//          /buurt https://costaselect.com/...
 //          /buurt Marbella koop
 
 const Anthropic = require('@anthropic-ai/sdk');
 const { claudeRetry } = require('../services/claude-retry');
 const { getPricesForLocation, getPriceHistory, formatPriceDataForClaude } = require('../services/ev-prices');
+const { scrapeCostaSelectPage } = require('../services/costaselect-scraper');
+const { lookupIdealista } = require('../services/idealista-lookup');
 
 const claude = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 const CLAUDE_MODEL = process.env.CLAUDE_MODEL || 'claude-sonnet-4-20250514';
@@ -126,6 +129,56 @@ function buildStatsBlocks(town, evData, inventory, marketingType) {
   return blocks;
 }
 
+const FULL_SELECT = 'ref,url,price,property_type,town,province,beds,baths,built_m2,plot_m2,pool,new_build,features,desc_nl,desc_en';
+
+async function resolveProperty(input) {
+  if (input.startsWith('http')) {
+    if (input.includes('idealista.com')) return lookupIdealista(input);
+    // Exacte URL match
+    const rows = await sbFetch(
+      `resales_properties?url=eq.${encodeURIComponent(input)}&select=${FULL_SELECT}&limit=1`
+    );
+    if (rows?.[0]) return rows[0];
+    if (input.includes('costaselect.com')) {
+      try {
+        const res = await fetch(input, { headers: { 'User-Agent': 'Mozilla/5.0' } });
+        const html = await res.text();
+        const m = html.match(/<small[^>]*>\s*(\d{5,7})\s*<\/small>/i);
+        if (m) {
+          const r2 = await sbFetch(`resales_properties?ref=eq.${encodeURIComponent(m[1])}&select=${FULL_SELECT}&limit=1`);
+          if (r2?.[0]) return r2[0];
+        }
+      } catch { /* ignore */ }
+      try { return await scrapeCostaSelectPage(input); } catch { /* ignore */ }
+    }
+    return null;
+  }
+  // Ref (5-7 cijfers)
+  const rows = await sbFetch(
+    `resales_properties?ref=eq.${encodeURIComponent(input)}&select=${FULL_SELECT}&limit=1`
+  );
+  return rows?.[0] || null;
+}
+
+function isPropertyInput(text) {
+  return /^https?:\/\//.test(text) || /^\d{5,7}$/.test(text.split(/\s+/)[0]);
+}
+
+function formatPropertyBlock(prop) {
+  const pricePerM2 = prop.price && prop.built_m2 ? Math.round(prop.price / prop.built_m2) : null;
+  return [
+    `=== WONING ===`,
+    `Type: ${prop.property_type || '?'} in ${prop.town || '?'}${prop.province ? `, ${prop.province}` : ''}`,
+    `Prijs: €${Number(prop.price || 0).toLocaleString('nl-NL')}`,
+    pricePerM2 ? `Prijs/m² (woning): €${pricePerM2.toLocaleString('nl-NL')}` : '',
+    `Bebouwde opp.: ${prop.built_m2 || '?'} m²`,
+    `Perceeloppervlakte: ${prop.plot_m2 || '?'} m²`,
+    `Slaapkamers: ${prop.beds ?? '?'} | Badkamers: ${prop.baths ?? '?'}`,
+    `Zwembad: ${prop.pool === true ? 'Ja' : prop.pool === false ? 'Nee' : 'Onbekend'}`,
+    prop.features?.length ? `Kenmerken: ${prop.features.join(', ')}` : '',
+  ].filter(Boolean).join('\n');
+}
+
 async function handleBuurt({ command, ack, client }) {
   await ack();
 
@@ -133,20 +186,20 @@ async function handleBuurt({ command, ack, client }) {
   if (!text) {
     await client.chat.postMessage({
       channel: command.channel_id,
-      text: 'Gebruik: `/buurt [locatie]`\nVoorbeelden:\n• `/buurt Jávea`\n• `/buurt Nueva Andalucia`\n• `/buurt Marbella koop`',
+      text: 'Gebruik: `/buurt [locatie of ref/URL]`\nVoorbeelden:\n• `/buurt Jávea`\n• `/buurt 771846`\n• `/buurt https://www.costaselect.com/...`',
     });
     return;
   }
 
   // Parse marketing type filter
   let marketingType = null;
-  let location = text;
-  if (/\bhuur\b/i.test(text)) { marketingType = 'rent'; location = text.replace(/\bhuur\b/i, '').trim(); }
-  if (/\bkoop\b/i.test(text)) { marketingType = 'sale'; location = text.replace(/\bkoop\b/i, '').trim(); }
+  let input = text;
+  if (/\bhuur\b/i.test(text)) { marketingType = 'rent'; input = text.replace(/\bhuur\b/i, '').trim(); }
+  if (/\bkoop\b/i.test(text)) { marketingType = 'sale'; input = text.replace(/\bkoop\b/i, '').trim(); }
 
   const statusMsg = await client.chat.postMessage({
     channel: command.channel_id,
-    text: `🏘️ Buurtanalyse ophalen voor _${location}_...`,
+    text: `🏘️ Buurtanalyse ophalen...`,
   });
 
   const update = async (msg) => {
@@ -154,6 +207,20 @@ async function handleBuurt({ command, ack, client }) {
   };
 
   try {
+    let prop = null;
+    let location = input;
+
+    // Auto-detect: is de input een property ref of URL?
+    if (isPropertyInput(input)) {
+      await update(`🔍 Property ophalen...`);
+      prop = await resolveProperty(input.split(/\s+/)[0]);
+      if (!prop) {
+        await update(`❌ Property niet gevonden: \`${input}\``);
+        return;
+      }
+      location = prop.town || location;
+    }
+
     await update(`🔍 Marktdata + aanbod ophalen voor ${location}...`);
 
     const [evData, history, inventory] = await Promise.all([
@@ -163,32 +230,46 @@ async function handleBuurt({ command, ack, client }) {
     ]);
 
     if (!evData.found && !inventory) {
-      await update(`❌ Geen data gevonden voor "${location}". Probeer de officiële plaatsnaam.`);
+      await update(`❌ Geen marktdata gevonden voor "${location}". Probeer de officiële plaatsnaam.`);
       return;
     }
 
     await update(`🤖 Analyse schrijven voor ${location}...`);
 
-    const evContext = evData.found ? formatPriceDataForClaude(evData, history) : `Geen E&V marktdata beschikbaar voor ${location}.`;
+    const evContext  = evData.found ? formatPriceDataForClaude(evData, history) : `Geen E&V marktdata beschikbaar voor ${location}.`;
     const invContext = formatInventory(inventory, location);
+    const propContext = prop ? formatPropertyBlock(prop) : null;
 
-    const prompt = `Je bent een vastgoedmarktanalist gespecialiseerd in Spaans onroerend goed. Schrijf een buurtanalyse van ${location} voor een Nederlandse vastgoedconsultant die dit gebruikt in klantgesprekken.
+    // Bereken marktpositie van de woning t.o.v. markt
+    let positioningNote = '';
+    if (prop?.price && prop?.built_m2) {
+      const propPerM2 = Math.round(prop.price / prop.built_m2);
+      const saleRecord = evData.prices?.find(p => p.marketing_type === 'sale');
+      if (saleRecord?.price_per_sqm) {
+        const mktPerM2 = Number(saleRecord.price_per_sqm);
+        const diff = Math.round(((propPerM2 - mktPerM2) / mktPerM2) * 100);
+        positioningNote = `\nMarktpositie woning: €${propPerM2.toLocaleString('nl-NL')}/m² vs marktgemiddelde €${Math.round(mktPerM2).toLocaleString('nl-NL')}/m² = ${diff > 0 ? '+' : ''}${diff}% t.o.v. markt.`;
+      }
+    }
+
+    const propSection = propContext ? `\n${propContext}${positioningNote}\n` : '';
+
+    const prompt = `Je bent een vastgoedmarktanalist gespecialiseerd in Spaans onroerend goed. ${prop ? `Analyseer de onderstaande woning in de context van de ${location} markt.` : `Schrijf een buurtanalyse van ${location}.`} Dit is voor een Nederlandse vastgoedconsultant die dit gebruikt in klantgesprekken.
 
 Structuur (gebruik deze kopjes exact):
-*Marktpositie*
-Hoe staat ${location} in de markt? Hot, stabiel of afkoelend? Vergelijk prijs/m² met het regionale gemiddelde als mogelijk.
+${prop ? `*Marktpositie van deze woning*\nStaat de woning boven of onder het marktgemiddelde? Is het een koopje of betaalt de koper een premium? Wees concreet in %.` : `*Marktpositie*\nHoe staat ${location} in de markt? Hot, stabiel of afkoelend?`}
 
 *Investeerdersprofiel*
-Wat trekt kopers hier naartoe? Welk type koper past bij deze markt (pensionado, investeerder, gezin, digitale nomade)? Waarom nu?
+Welk type koper past bij ${prop ? 'deze woning en' : ''} deze markt? Waarom nu?
 
 *Rendementsanalyse*
-Bereken een indicatieve bruto huuryield als je zowel koop- als huurprijs/m² hebt. Wat is de prijstrend van de afgelopen jaren?
+${prop ? `Bereken indicatieve bruto huuryield voor deze woning op basis van de huurprijs/m² in ${location}.` : `Bereken indicatieve bruto huuryield als je zowel koop- als huurprijs/m² hebt.`} Wat is de prijstrend?
 
 *Risico's & aandachtspunten*
-Eerlijk en concreet — wat moet een koper weten?
+Eerlijk en concreet.
 
 *Consultant talking points*
-• [Concreet argument 1 voor de consultant]
+• [Concreet argument 1]
 • [Concreet argument 2]
 • [Concreet argument 3]
 
@@ -197,7 +278,7 @@ Regels:
 - Gebruik Slack mrkdwn: *bold*, geen #headers
 - Wees concreet: gebruik de exacte cijfers uit de data
 - Max 600 woorden
-
+${propSection}
 ${evContext}
 
 ${invContext}`;
@@ -208,18 +289,23 @@ ${invContext}`;
       messages: [{ role: 'user', content: prompt }],
     }, { label: 'Buurt' });
 
-    const analysis = response.content[0].text.trim();
+    const analysis  = response.content[0].text.trim();
     const statsBlocks = buildStatsBlocks(location, evData.found ? evData : { location, prices: [] }, inventory, marketingType);
 
-    const analysisBlock = {
-      type: 'section',
-      text: { type: 'mrkdwn', text: analysis },
-    };
+    // Voeg property header toe als er een woning is
+    if (prop) {
+      const propTitle = `${prop.property_type || 'Property'} in ${prop.town || '?'} — €${Number(prop.price || 0).toLocaleString('nl-NL')}`;
+      const propUrl   = prop.url || null;
+      statsBlocks.unshift({
+        type: 'section',
+        text: { type: 'mrkdwn', text: `*Woning:* ${propUrl ? `<${propUrl}|${propTitle}>` : propTitle}` },
+      });
+    }
 
     await client.chat.update({
       channel: command.channel_id,
       ts: statusMsg.ts,
-      blocks: [...statsBlocks, { type: 'divider' }, analysisBlock],
+      blocks: [...statsBlocks, { type: 'divider' }, { type: 'section', text: { type: 'mrkdwn', text: analysis } }],
       text: `Buurtanalyse: ${location}`,
     });
 
