@@ -94,9 +94,6 @@ async function lookupIdealista(url) {
 
   // When using propertyCodes, all data is nested under _details
   const d = item._details || item;
-  console.log(`[Vergelijk] Idealista _details keys: ${Object.keys(d).join(', ')}`);
-  console.log(`[Vergelijk] Idealista ubication: ${JSON.stringify(d.ubication)}`);
-  console.log(`[Vergelijk] Idealista moreCharacteristics: ${JSON.stringify(d.moreCharacteristics)}`);
 
   const get = (obj, dotKey) => {
     if (obj[dotKey] !== undefined) return obj[dotKey];
@@ -106,33 +103,32 @@ async function lookupIdealista(url) {
     return val ?? null;
   };
 
-  const features = [];
-  if (get(d, 'features.hasSwimmingPool')) features.push('pool');
-  if (get(d, 'features.hasGarden')) features.push('garden');
-  if (get(d, 'features.hasTerrace')) features.push('terrace');
-  if (get(d, 'features.hasAirConditioning')) features.push('air_conditioning');
-  if (d.hasLift) features.push('elevator');
-  if (get(d, 'parkingSpace.hasParkingSpace')) features.push('garage');
-  const desc = (d.description || d.propertyComment || '').toLowerCase();
-  if (!features.includes('pool') && (desc.includes('piscina') || desc.includes('pool'))) features.push('pool');
-
   const price = d.price || get(d, 'priceInfo.price.amount') || null;
   const ubication = d.ubication || {};
   const chars = d.moreCharacteristics || {};
-  const itemUrl = get(d, 'detailWebLink') || get(d, 'link') || `https://www.idealista.com/inmueble/${propertyCode}/`;
+  const itemUrl = d.detailWebLink || d.link || `https://www.idealista.com/inmueble/${propertyCode}/`;
+
+  const features = [];
+  if (chars.swimmingPool) features.push('pool');
+  if (chars.garden) features.push('garden');
+  if (chars.terrace) features.push('terrace');
+  if (chars.airConditioning) features.push('air_conditioning');
+  if (chars.lift) features.push('elevator');
+  if (chars.garage) features.push('garage');
+  if (chars.boxroom) features.push('storage');
 
   return {
     ref:           propertyCode,
     url:           itemUrl,
     price,
     property_type: d.propertyType || null,
-    town:          ubication.municipality || ubication.town || null,
-    province:      ubication.province || ubication.countyName || null,
+    town:          ubication.administrativeAreaLevel2 || null,
+    province:      ubication.administrativeAreaLevel1 || null,
     beds:          chars.roomNumber ?? null,
     baths:         chars.bathNumber ?? null,
-    built_m2:      chars.constructedArea || chars.builtArea || null,
-    plot_m2:       chars.plotArea || chars.groundPlotArea || null,
-    pool:          features.includes('pool') || null,
+    built_m2:      chars.constructedArea || null,
+    plot_m2:       chars.plotOfLand || null,
+    pool:          chars.swimmingPool ?? null,
     new_build:     d.newDevelopment || (d.state === 'newDevelopment') || null,
     features,
     desc_en:       d.propertyComment || null,
