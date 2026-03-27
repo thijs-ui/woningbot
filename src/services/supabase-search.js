@@ -67,7 +67,7 @@ function mapRow(row) {
     bathrooms:     row.baths,
     size_m2:       row.built_m2,
     floor:         null,
-    url:           null,
+    url:           row.url || null,
     thumbnail,
     features,
     property_type: mapPropertyType(row.property_type),
@@ -96,7 +96,7 @@ function buildQueryUrl(hardFilters) {
 
   // Selecteer alleen benodigde kolommen
   params.set('select', [
-    'ref', 'price', 'currency', 'price_freq', 'property_type',
+    'ref', 'url', 'price', 'currency', 'price_freq', 'property_type',
     'town', 'province', 'latitude', 'longitude',
     'beds', 'baths', 'pool', 'new_build',
     'built_m2', 'plot_m2', 'features',
