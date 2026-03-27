@@ -2,7 +2,7 @@
 // Gebruik: /klant Jan Janssen        — shortlist bekijken
 //          /klant lijst              — alle klanten
 
-const { getClientProperties, getAllClients } = require('../services/client-service');
+const { getClientProperties, getAllClients, removeProperty } = require('../services/client-service');
 
 function formatProperty(row) {
   const prop = row.property || {};
@@ -36,20 +36,39 @@ function formatProperty(row) {
   const savedAt = new Date(row.saved_at).toLocaleDateString('nl-NL');
   lines.push(`_${savedAt} · ${savedBy}_`);
 
-  const block = {
-    type: 'section',
-    text: { type: 'mrkdwn', text: lines.join('\n') },
-  };
+  const blocks = [
+    {
+      type: 'section',
+      text: { type: 'mrkdwn', text: lines.join('\n') },
+      ...(thumbnail ? {
+        accessory: {
+          type: 'image',
+          image_url: thumbnail,
+          alt_text: prop.town || 'Property',
+        },
+      } : {}),
+    },
+    {
+      type: 'actions',
+      elements: [
+        {
+          type: 'button',
+          text: { type: 'plain_text', text: '🗑 Verwijderen', emoji: true },
+          style: 'danger',
+          confirm: {
+            title: { type: 'plain_text', text: 'Verwijderen?' },
+            text: { type: 'plain_text', text: 'Wil je deze property uit de shortlist verwijderen?' },
+            confirm: { type: 'plain_text', text: 'Ja, verwijder' },
+            deny: { type: 'plain_text', text: 'Annuleer' },
+          },
+          action_id: 'remove_client_property',
+          value: JSON.stringify({ id: row.id, slack_user_id: row.slack_user_id }),
+        },
+      ],
+    },
+  ];
 
-  if (thumbnail) {
-    block.accessory = {
-      type: 'image',
-      image_url: thumbnail,
-      alt_text: prop.town || 'Property',
-    };
-  }
-
-  return block;
+  return blocks;
 }
 
 async function handleKlant({ command, ack, respond }) {
@@ -101,7 +120,7 @@ async function handleKlant({ command, ack, respond }) {
         text: { type: 'mrkdwn', text: `*Shortlist voor ${text}* — ${rows.length} propert${rows.length === 1 ? 'y' : 'ies'}` },
       },
       { type: 'divider' },
-      ...rows.map(formatProperty),
+      ...rows.flatMap(formatProperty),
     ];
 
     await respond({
@@ -115,4 +134,17 @@ async function handleKlant({ command, ack, respond }) {
   }
 }
 
-module.exports = { handleKlant };
+async function handleRemoveClientProperty({ ack, body, respond }) {
+  await ack();
+
+  try {
+    const { id, slack_user_id } = JSON.parse(body.actions[0].value);
+    await removeProperty(id, body.user.id);
+    await respond({ response_type: 'ephemeral', replace_original: false, text: '✅ Property verwijderd uit shortlist.' });
+  } catch (err) {
+    console.error('[Klant] Verwijder fout:', err.message);
+    await respond({ response_type: 'ephemeral', replace_original: false, text: `❌ Verwijderen mislukt: ${err.message}` });
+  }
+}
+
+module.exports = { handleKlant, handleRemoveClientProperty };

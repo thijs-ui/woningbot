@@ -9,7 +9,7 @@ const { handleProject } = require('./handlers/project');
 const { handlePrijs } = require('./handlers/prijs');
 const { handleAlert, handleStopAlertAction } = require('./handlers/alert');
 const { handleSave } = require('./handlers/save');
-const { handleKlant } = require('./handlers/klant');
+const { handleKlant, handleRemoveClientProperty } = require('./handlers/klant');
 const { runAlertCheck } = require('./jobs/alert-check');
 
 const app = new App({
@@ -29,6 +29,7 @@ app.command('/klant', handleKlant);
 
 // Register Slack action handlers (interactive buttons)
 app.action('stop_alert', handleStopAlertAction);
+app.action('remove_client_property', handleRemoveClientProperty);
 
 // Listen for ALL message events — filter in handler
 app.event('message', async (args) => {
