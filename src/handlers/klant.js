@@ -4,6 +4,37 @@
 
 const { getClientProperties, getAllClients, removeProperty } = require('../services/client-service');
 
+// Publieke versie zonder verwijder knop (voor delen in kanaal)
+function formatPropertyPublic(row) {
+  const prop = row.property || {};
+  const images = (prop.images || []).map(img => img?.url).filter(Boolean);
+  const thumbnail = images[0] || null;
+  const displayUrl = prop.url || row.url || null;
+  const lines = [];
+
+  if (prop.price) {
+    const details = [
+      prop.property_type || '',
+      prop.town ? `${prop.town}${prop.province ? `, ${prop.province}` : ''}` : '',
+      `€${Number(prop.price).toLocaleString('nl-NL')}`,
+      prop.beds ? `${prop.beds} slpk` : '',
+      prop.built_m2 ? `${prop.built_m2}m²` : '',
+      prop.pool ? '🏊' : '',
+    ].filter(Boolean).join('  ·  ');
+    lines.push(displayUrl ? `*<${displayUrl}|${details}>*` : `*${details}*`);
+  } else if (row.url) {
+    lines.push(displayUrl ? `*<${displayUrl}|${displayUrl}>*` : `*${row.url}*`);
+  }
+
+  if (row.note) lines.push(`📝 _${row.note}_`);
+
+  return {
+    type: 'section',
+    text: { type: 'mrkdwn', text: lines.join('\n') },
+    ...(thumbnail ? { accessory: { type: 'image', image_url: thumbnail, alt_text: prop.town || 'Property' } } : {}),
+  };
+}
+
 function formatProperty(row) {
   const prop = row.property || {};
   const images = (prop.images || []).map(img => img?.url).filter(Boolean);
@@ -102,32 +133,56 @@ async function handleKlant({ command, ack, respond }) {
     return;
   }
 
+  // Detecteer "delen" subcommand: /klant Jan Janssen delen
+  const delenMatch = text.match(/^(.+?)\s+delen$/i);
+  const clientName = delenMatch ? delenMatch[1].trim() : text;
+  const isDelen    = !!delenMatch;
+
   // Toon shortlist voor specifieke klant
   try {
-    const rows = await getClientProperties(text);
+    const rows = await getClientProperties(clientName);
 
     if (!rows || rows.length === 0) {
       await respond({
         response_type: 'ephemeral',
-        text: `Geen properties gevonden voor *${text}*. Gebruik \`/save ${text} [ref of URL]\` om iets op te slaan.`,
+        text: `Geen properties gevonden voor *${clientName}*. Gebruik \`/save ${clientName} [ref of URL]\` om iets op te slaan.`,
       });
       return;
     }
 
-    const blocks = [
-      {
-        type: 'section',
-        text: { type: 'mrkdwn', text: `*Shortlist voor ${text}* — ${rows.length} propert${rows.length === 1 ? 'y' : 'ies'}` },
-      },
-      { type: 'divider' },
-      ...rows.flatMap(formatProperty),
-    ];
+    if (isDelen) {
+      // Publiek in kanaal posten — zonder verwijder knoppen
+      const blocks = [
+        {
+          type: 'section',
+          text: { type: 'mrkdwn', text: `*Shortlist voor ${clientName}* — ${rows.length} propert${rows.length === 1 ? 'y' : 'ies'}\n_Gedeeld door <@${command.user_id}>_` },
+        },
+        { type: 'divider' },
+        ...rows.map(formatPropertyPublic),
+      ];
 
-    await respond({
-      response_type: 'ephemeral',
-      blocks,
-      text: `Shortlist voor ${text}`,
-    });
+      await respond({
+        response_type: 'in_channel',
+        blocks,
+        text: `Shortlist voor ${clientName}`,
+      });
+    } else {
+      // Ephemeral met verwijder knoppen
+      const blocks = [
+        {
+          type: 'section',
+          text: { type: 'mrkdwn', text: `*Shortlist voor ${clientName}* — ${rows.length} propert${rows.length === 1 ? 'y' : 'ies'}` },
+        },
+        { type: 'divider' },
+        ...rows.flatMap(formatProperty),
+      ];
+
+      await respond({
+        response_type: 'ephemeral',
+        blocks,
+        text: `Shortlist voor ${clientName}`,
+      });
+    }
   } catch (err) {
     console.error('[Klant] Fout:', err.message);
     await respond({ response_type: 'ephemeral', text: `❌ Fout: ${err.message}` });
