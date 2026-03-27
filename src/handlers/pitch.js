@@ -7,6 +7,7 @@ const Anthropic = require('@anthropic-ai/sdk');
 const { claudeRetry } = require('../services/claude-retry');
 const { getClientProperties } = require('../services/client-service');
 const { scrapeCostaSelectPage } = require('../services/costaselect-scraper');
+const { lookupIdealista } = require('../services/idealista-lookup');
 
 const claude = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 const CLAUDE_MODEL = process.env.CLAUDE_MODEL || 'claude-sonnet-4-20250514';
@@ -27,6 +28,8 @@ async function sbFetch(path) {
 
 async function resolveProperty(input) {
   if (input.startsWith('http')) {
+    if (input.includes('idealista.com')) return lookupIdealista(input);
+
     // Exacte URL match
     const rows = await sbFetch(
       `resales_properties?url=eq.${encodeURIComponent(input)}&select=${FULL_SELECT}&limit=1`
