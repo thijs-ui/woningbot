@@ -69,18 +69,20 @@ async function handleSave({ command, ack, respond }) {
   }
 
   try {
-    await saveProperty({ clientName, slackUserId: command.user_id, ref, url, note });
-
-    // Haal propertydetails op voor bevestiging
+    // Haal propertydetails op voor bevestiging én last_known_price
     let details = '';
+    let lastKnownPrice = null;
     if (ref) {
       const prop = await lookupProperty(ref);
       if (prop) {
         details = ` — ${prop.property_type || 'Property'} in ${prop.town || '?'}, €${Number(prop.price || 0).toLocaleString('nl-NL')}`;
+        lastKnownPrice = prop.price || null;
       }
     } else if (url) {
       details = ` — ${url}`;
     }
+
+    await saveProperty({ clientName, slackUserId: command.user_id, ref, url, note, lastKnownPrice });
 
     await respond({
       response_type: 'ephemeral',

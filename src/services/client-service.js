@@ -23,13 +23,14 @@ async function sbFetch(path, options = {}) {
  * Sla een property op voor een klant.
  * Maakt de klant automatisch aan als die nog niet bestaat.
  */
-async function saveProperty({ clientName, slackUserId, ref, url, note }) {
+async function saveProperty({ clientName, slackUserId, ref, url, note, lastKnownPrice }) {
   const payload = {
-    client_name:   clientName,
-    slack_user_id: slackUserId,
-    ref:           ref || null,
-    url:           url || null,
-    note:          note || null,
+    client_name:       clientName,
+    slack_user_id:     slackUserId,
+    ref:               ref || null,
+    url:               url || null,
+    note:              note || null,
+    last_known_price:  lastKnownPrice || null,
   };
 
   return sbFetch('client_properties', {
@@ -84,6 +85,25 @@ async function getAllClients() {
 }
 
 /**
+ * Update last_known_price na een prijswijziging.
+ */
+async function updateLastKnownPrice(id, price) {
+  return sbFetch(
+    `client_properties?id=eq.${id}`,
+    { method: 'PATCH', headers: { Prefer: 'return=minimal' }, body: JSON.stringify({ last_known_price: price }) }
+  );
+}
+
+/**
+ * Haal alle shortlist entries op met een ref en last_known_price voor de prijscheck.
+ */
+async function getShortlistForPriceCheck() {
+  return sbFetch(
+    'client_properties?ref=not.is.null&last_known_price=not.is.null&select=id,client_name,slack_user_id,ref,url,last_known_price'
+  );
+}
+
+/**
  * Verwijder een opgeslagen property.
  */
 async function removeProperty(id, slackUserId) {
@@ -103,4 +123,4 @@ async function lookupProperty(ref) {
   return rows?.[0] || null;
 }
 
-module.exports = { saveProperty, getClientProperties, getAllClients, removeProperty, lookupProperty };
+module.exports = { saveProperty, getClientProperties, getAllClients, removeProperty, lookupProperty, updateLastKnownPrice, getShortlistForPriceCheck };
