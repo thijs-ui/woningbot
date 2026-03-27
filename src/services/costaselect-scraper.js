@@ -1,6 +1,11 @@
 // ─── Costa Select page scraper ─────────────────────────────────────────────
 // Haalt property data op rechtstreeks van costaselect.com als fallback
 // wanneer de ref niet in Supabase staat.
+//
+// HTML structuur costaselect.com (OGonline CMS):
+// - Specs als <dt>Label</dt><dd>Waarde</dd> paren
+// - Beschrijving in sectie na "Omschrijving" header
+// - Ref in <small>756790</small>
 
 const cheerio = require('cheerio');
 
@@ -18,67 +23,29 @@ async function fetchPage(url) {
 }
 
 /**
- * Probeer JSON-LD structured data te extraheren.
+ * Bouw een map van dt→dd paren uit de pagina.
+ * Geeft { "Prijs": "€ 1.295.000", "Aantal slaapkamers": "4", ... }
  */
-function extractJsonLd($) {
-  let result = {};
-  $('script[type="application/ld+json"]').each((_, el) => {
-    try {
-      const data = JSON.parse($(el).text());
-      const obj = Array.isArray(data) ? data[0] : data;
-      if (obj['@type'] && (obj['@type'].includes('RealEstate') || obj['@type'].includes('Product') || obj['@type'].includes('Place'))) {
-        result = obj;
-      }
-      // Neem altijd de eerste niet-lege match
-      if (!result['@type'] && obj) result = obj;
-    } catch { /* ignore */ }
+function buildSpecMap($) {
+  const map = {};
+  $('dt').each((_, el) => {
+    const key = $(el).text().trim();
+    const val = $(el).next('dd').text().trim();
+    if (key && val) map[key] = val;
   });
-  return result;
+  return map;
 }
 
-/**
- * Extraheer prijs uit HTML — zoekt naar meest voorkomende patronen op OGonline sites.
- */
-function extractPrice($, html) {
-  // JSON-LD price
-  let price = null;
-
-  // Probeer diverse selectors
-  const priceSelectors = [
-    '[class*="price"] [class*="amount"]',
-    '[class*="price"]',
-    '[itemprop="price"]',
-    '[class*="Price"]',
-  ];
-  for (const sel of priceSelectors) {
-    const text = $(sel).first().text().trim();
-    const match = text.match(/[\d.,]+/);
-    if (match) {
-      const num = parseFloat(match[0].replace(/\./g, '').replace(',', '.'));
-      if (num > 10000) { price = num; break; }
-    }
-  }
-
-  // Fallback: regex op hele HTML
-  if (!price) {
-    const m = html.match(/[€$]\s*([\d]{3,}[\d.,]*)/);
-    if (m) price = parseFloat(m[1].replace(/\./g, '').replace(',', '.'));
-  }
-
-  return price || null;
+function parsePrice(str) {
+  if (!str) return null;
+  const m = str.replace(/\./g, '').match(/[\d]+/);
+  return m ? parseInt(m[0]) : null;
 }
 
-/**
- * Extraheer een getal uit tekst voor een specifiek kenmerk.
- */
-function extractStat($, html, keywords) {
-  for (const kw of keywords) {
-    // Zoek naar getal vlak bij het keyword in de HTML
-    const re = new RegExp(`(\\d+)\\s*${kw}|${kw}[^\\d]*(\\d+)`, 'i');
-    const m = html.match(re);
-    if (m) return parseInt(m[1] || m[2]);
-  }
-  return null;
+function parseInt2(str) {
+  if (!str) return null;
+  const m = str.match(/[\d]+/);
+  return m ? parseInt(m[0]) : null;
 }
 
 /**
@@ -89,82 +56,78 @@ async function scrapeCostaSelectPage(url) {
   const html = await fetchPage(url);
   const $ = cheerio.load(html);
 
-  const jsonLd = extractJsonLd($);
-
   // Ref uit <small> tag
   const refMatch = html.match(/<small[^>]*>\s*(\d{5,7})\s*<\/small>/i);
   const ref = refMatch?.[1] || null;
 
-  // Prijs
-  const price = extractPrice($, html);
+  // Specs via dt/dd map
+  const specs = buildSpecMap($);
 
-  // Beschrijving — probeer meta description en content blokken
-  const metaDesc = $('meta[name="description"]').attr('content') || '';
-  const ogDesc = $('meta[property="og:description"]').attr('content') || '';
+  const price = parsePrice(specs['Prijs'] || specs['Price'] || specs['Prix'] || specs['Preis'] || '');
 
-  // Zoek langere beschrijvingstekst in de pagina
-  let desc = '';
-  const descSelectors = [
-    '[class*="description"]',
-    '[class*="Description"]',
-    '[class*="content"] p',
-    '[class*="details"] p',
-    'article p',
-  ];
-  for (const sel of descSelectors) {
-    const text = $(sel).text().trim();
-    if (text.length > desc.length && text.length > 50) desc = text;
-  }
-  if (!desc) desc = ogDesc || metaDesc;
+  const beds  = parseInt2(specs['Aantal slaapkamers'] || specs['Bedrooms'] || specs['Schlafzimmer'] || specs['Chambres'] || '');
+  const baths = parseInt2(specs['Aantal badkamers']   || specs['Bathrooms'] || specs['Badezimmer']  || specs['Salles de bain'] || '');
 
-  // Titel / type
-  const ogTitle = $('meta[property="og:title"]').attr('content') || '';
-  const h1 = $('h1').first().text().replace(/\s*\d{5,7}\s*$/, '').trim();
-  const title = ogTitle || h1 || '';
+  const built_m2 = parseInt2(
+    specs['Woonoppervlakte'] || specs['Bebouwde oppervlakte'] || specs['Built area'] ||
+    specs['Wohnfläche'] || specs['Surface habitable'] || ''
+  );
+  const plot_m2 = parseInt2(
+    specs['Perceeloppervlakte'] || specs['Plot size'] || specs['Grundstück'] ||
+    specs['Surface terrain'] || ''
+  );
 
-  // Locatie — uit URL of titel
-  const urlParts = url.split('/').filter(Boolean);
-  const town = urlParts[urlParts.length - 2]
-    ? decodeURIComponent(urlParts[urlParts.length - 2]).replace(/-/g, ' ')
-    : null;
+  const town     = specs['Plaats']    || specs['Town']  || specs['Ort']    || specs['Ville']    || null;
+  const province = specs['Provincie'] || specs['Province'] || specs['Provinz'] || specs['Province'] || null;
 
-  // Property type uit URL of titel
-  let property_type = null;
-  if (/villa/i.test(title + url)) property_type = 'Villa';
-  else if (/appartement|apartment/i.test(title + url)) property_type = 'Appartement';
-  else if (/townhouse|rijtjeshuis/i.test(title + url)) property_type = 'Townhouse';
-  else if (/finca/i.test(title + url)) property_type = 'Finca';
-
-  // Kenmerken via stats
-  const beds = extractStat($, html, ['slaapkamers?', 'bedrooms?', 'dormitorios?', 'chambres?']);
-  const baths = extractStat($, html, ['badkamers?', 'bathrooms?', 'ba[ñn]os?', 'salles? de bain']);
-  const built_m2 = extractStat($, html, ['m[²2]\\s*bebouwd', 'm[²2]\\s*woon', 'built\\s*m[²2]', 'superficie construida']);
-  const plot_m2 = extractStat($, html, ['m[²2]\\s*perceel', 'plot\\s*m[²2]', 'superficie parcela', 'terrain']);
+  const rawType = specs['Soort woonhuis'] || specs['Property type'] || specs['Tipo'] || null;
 
   // Pool
-  const hasPool = /zwembad|pool|piscina/i.test(html);
+  const poolSpec = specs['Zwembad'] || specs['Pool'] || specs['Piscine'] || '';
+  const hasPool = /ja|yes|oui|ja/i.test(poolSpec) || /pool|zwembad|piscina/i.test(html.substring(0, 50000));
 
-  console.log(`[CostaScraper] ref=${ref}, price=${price}, beds=${beds}, built=${built_m2}, town=${town}`);
+  // Nieuwbouw
+  const buildType = specs['Soort bouw'] || specs['Construction'] || '';
+  const isNewBuild = /nieuwbouw|new build|obra nueva/i.test(buildType);
+
+  // Beschrijving — zoek sectie na "Omschrijving" header
+  let desc = '';
+  $('h2, h3, strong').each((_, el) => {
+    if (/omschrijving|description|beschrijving/i.test($(el).text())) {
+      // Pak de tekst van de volgende sibling paragrafen
+      let node = $(el).parent();
+      const text = node.next().text().trim() || node.parent().find('p').text().trim();
+      if (text.length > desc.length) desc = text;
+    }
+  });
+
+  // Fallback beschrijving: langste <p> blok op de pagina
+  if (desc.length < 100) {
+    $('p').each((_, el) => {
+      const t = $(el).text().trim();
+      if (t.length > desc.length) desc = t;
+    });
+  }
+
+  console.log(`[CostaScraper] ref=${ref}, price=${price}, beds=${beds}, baths=${baths}, built=${built_m2}, plot=${plot_m2}, town=${town}, province=${province}`);
 
   return {
     ref,
     url,
     price,
-    property_type,
-    town: town
-      ? town.charAt(0).toUpperCase() + town.slice(1)
-      : null,
-    province: null,
+    property_type: rawType || null,
+    town:          town || null,
+    province:      province || null,
     beds,
     baths,
     built_m2,
     plot_m2,
-    pool: hasPool || null,
-    new_build: /nieuwbouw|new build|obra nueva/i.test(html) || null,
-    features: hasPool ? ['pool'] : [],
-    desc_nl: /\bnl\b|\bnederlands\b/i.test(url) ? desc.substring(0, 1000) : null,
-    desc_en: desc.substring(0, 1000),
-    _scraped: true, // markeer als live gescraped (geen Supabase data)
+    pool:          hasPool || null,
+    new_build:     isNewBuild || null,
+    features:      hasPool ? ['pool'] : [],
+    desc_nl:       desc.substring(0, 1000) || null,
+    desc_en:       null,
+    _scraped:      true,
   };
 }
 
