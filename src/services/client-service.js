@@ -41,13 +41,28 @@ async function saveProperty({ clientName, slackUserId, ref, url, note }) {
 
 /**
  * Haal alle opgeslagen properties op voor een klant.
- * Joined met resales_properties voor extra details.
+ * Doet een aparte lookup in resales_properties per ref.
  */
 async function getClientProperties(clientName) {
   const encoded = encodeURIComponent(clientName);
-  return sbFetch(
-    `client_properties?client_name=ilike.${encoded}&select=*,property:resales_properties(ref,url,price,property_type,town,province,beds,baths,built_m2,pool,images)&order=saved_at.desc`
+  const rows = await sbFetch(
+    `client_properties?client_name=ilike.${encoded}&select=*&order=saved_at.desc`
   );
+  if (!rows?.length) return [];
+
+  // Haal property details op voor rows met een ref
+  const refs = [...new Set(rows.filter(r => r.ref).map(r => r.ref))];
+  let propMap = {};
+
+  if (refs.length) {
+    const refFilter = refs.map(r => encodeURIComponent(r)).join(',');
+    const props = await sbFetch(
+      `resales_properties?ref=in.(${refFilter})&select=ref,url,price,property_type,town,province,beds,baths,built_m2,pool,images`
+    );
+    for (const p of (props || [])) propMap[p.ref] = p;
+  }
+
+  return rows.map(row => ({ ...row, property: row.ref ? (propMap[row.ref] || {}) : {} }));
 }
 
 /**
