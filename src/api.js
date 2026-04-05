@@ -6,6 +6,7 @@
 const express = require('express');
 const cors = require('cors');
 const { v4: uuidv4 } = require('uuid');
+const Anthropic = require('@anthropic-ai/sdk');
 
 const { parseSearchQuery } = require('./services/claude-parser');
 const { selectProperties } = require('./services/claude-selector');
@@ -15,10 +16,19 @@ const { deduplicateListings } = require('./services/dedup');
 const { preFilterListings, postValidateSelections } = require('./services/property-filter');
 const { refineSelection } = require('./services/claude-refiner');
 const { getThread, setThread, updateThread, addConversation } = require('./store/thread-memory');
+const { claudeRetry } = require('./services/claude-retry');
+const { getPricesForLocation, getPriceHistory, comparePrices, formatPriceDataForClaude } = require('./services/ev-prices');
+const { lookupProperty, getClientProperties, getAllClients } = require('./services/client-service');
+const { scrapeCostaSelectPage } = require('./services/costaselect-scraper');
+const { lookupIdealista } = require('./services/idealista-lookup');
+const { saveAlert, getAlertsForUser, deactivateAlert } = require('./services/alert-service');
 
-const app = express();
-app.use(cors());
-app.use(express.json());
+const claude = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+const CLAUDE_MODEL = process.env.CLAUDE_MODEL || 'claude-sonnet-4-20250514';
+
+const expressApp = express();
+expressApp.use(cors());
+expressApp.use(express.json());
 
 // Simple API key auth
 function authenticate(req, res, next) {
@@ -29,19 +39,62 @@ function authenticate(req, res, next) {
   next();
 }
 
-app.use('/api', authenticate);
+expressApp.use('/api', authenticate);
 
 // Health check (no auth)
-app.get('/health', (req, res) => {
+expressApp.get('/health', (req, res) => {
   res.json({ status: 'ok', service: 'woningbot-api' });
 });
 
-/**
- * POST /api/chat
- * Body: { message: string, sessionId?: string }
- * Returns: { response: string, sessionId: string, properties?: array, step?: string }
- */
-app.post('/api/chat', async (req, res) => {
+// ─── Intent Detection ──────────────────────────────────────────────────────
+
+const INTENT_PROMPT = `Je bent een intent classifier voor een vastgoed-chatbot. Classificeer het bericht van de gebruiker.
+
+Mogelijke intents:
+- "zoekwoning" — Zoekt woningen (bestaande bouw of algemeen). Bevat locatie, budget, kenmerken.
+- "nieuwbouw" — Zoekt specifiek nieuwbouwprojecten.
+- "vergelijk" — Wil 2+ woningen vergelijken. Bevat URLs of referentienummers.
+- "pitch" — Wil een verkooppitch/presentatie voor een woning. Bevat URL of referentienummer.
+- "buurt" — Wil informatie over een buurt/wijk/stad.
+- "prijs" — Wil prijsinformatie, marktdata, trends voor een locatie.
+- "klant" — Wil klantgegevens bekijken, shortlist, of alle klanten.
+- "alert" — Wil een alert aanmaken, bekijken of stoppen.
+- "verfijn" — Verfijnt een eerdere zoekopdracht (alleen als er een actieve sessie is).
+- "algemeen" — Iets anders, algemene vraag.
+
+Antwoord ALLEEN met een JSON object:
+{"intent": "...", "query": "de relevante zoekterm/input zonder het commando-deel"}
+
+Voorbeelden:
+- "Villa in Estepona, 3 slpk, 500k" → {"intent": "zoekwoning", "query": "villa in Estepona, 3 slpk, 500k"}
+- "Nieuwbouw Costa del Sol, 2 slaapkamers" → {"intent": "nieuwbouw", "query": "Costa del Sol, 2 slaapkamers"}
+- "Vergelijk https://idealista.com/123 en https://idealista.com/456" → {"intent": "vergelijk", "query": "https://idealista.com/123 https://idealista.com/456"}
+- "Maak een pitch voor 771846" → {"intent": "pitch", "query": "771846"}
+- "Hoe is de buurt in Jávea?" → {"intent": "buurt", "query": "Jávea"}
+- "Wat zijn de prijzen in Marbella?" → {"intent": "prijs", "query": "Marbella"}
+- "Shortlist van Jan Janssen" → {"intent": "klant", "query": "Jan Janssen"}
+- "Alert voor nieuwbouw in Estepona, max 400k" → {"intent": "alert", "query": "nieuwbouw in Estepona, max 400k"}
+- "Toon alleen villa's met zwembad" → {"intent": "verfijn", "query": "alleen villa's met zwembad"}`;
+
+async function detectIntent(message) {
+  try {
+    const response = await claude.messages.create({
+      model: CLAUDE_MODEL,
+      max_tokens: 150,
+      messages: [{ role: 'user', content: `${INTENT_PROMPT}\n\nBericht: "${message}"` }],
+    });
+    const text = response.content[0].text.trim();
+    const json = JSON.parse(text.match(/\{[\s\S]*\}/)?.[0] || '{}');
+    return { intent: json.intent || 'algemeen', query: json.query || message };
+  } catch (err) {
+    console.error('[API] Intent detection failed:', err.message);
+    return { intent: 'zoekwoning', query: message };
+  }
+}
+
+// ─── Main Chat Endpoint ────────────────────────────────────────────────────
+
+expressApp.post('/api/chat', async (req, res) => {
   const { message, sessionId } = req.body;
   const ts = new Date().toISOString();
 
@@ -49,21 +102,54 @@ app.post('/api/chat', async (req, res) => {
     return res.status(400).json({ error: 'message is required' });
   }
 
-  console.log(`[${ts}] [API] Chat message: "${message.substring(0, 100)}" (session: ${sessionId || 'new'})`);
+  console.log(`[${ts}] [API] Chat: "${message.substring(0, 100)}" (session: ${sessionId || 'new'})`);
 
   try {
-    // If we have a session, this is a follow-up / refinement
-    if (sessionId) {
+    // Detect intent
+    const { intent, query } = await detectIntent(message);
+    console.log(`[${ts}] [API] Intent: ${intent}, Query: "${query.substring(0, 80)}"`);
+
+    // If we have a session and intent is refinement, refine
+    if (sessionId && (intent === 'verfijn' || intent === 'zoekwoning')) {
       const threadData = await getThread(sessionId);
       if (threadData && threadData.all_properties) {
-        // Refine existing search
         const result = await handleRefinement(sessionId, threadData, message);
         return res.json(result);
       }
     }
 
-    // New search — run the full pipeline
-    const result = await handleNewSearch(message);
+    // Route to handler
+    let result;
+    switch (intent) {
+      case 'zoekwoning':
+        result = await handleNewSearch(query);
+        break;
+      case 'nieuwbouw':
+        result = await handleNieuwbouw(query);
+        break;
+      case 'vergelijk':
+        result = await handleVergelijk(query);
+        break;
+      case 'pitch':
+        result = await handlePitch(query);
+        break;
+      case 'buurt':
+        result = await handleBuurt(query);
+        break;
+      case 'prijs':
+        result = await handlePrijs(query);
+        break;
+      case 'klant':
+        result = await handleKlant(query);
+        break;
+      case 'alert':
+        result = await handleAlert(query);
+        break;
+      default:
+        result = await handleAlgemeen(message);
+        break;
+    }
+
     return res.json(result);
 
   } catch (error) {
@@ -75,14 +161,12 @@ app.post('/api/chat', async (req, res) => {
   }
 });
 
-/**
- * Handle a new property search (equivalent to /zoekwoning)
- */
+// ─── Handler: Zoekwoning (existing) ────────────────────────────────────────
+
 async function handleNewSearch(queryText) {
   const ts = new Date().toISOString();
   const sessionId = uuidv4();
 
-  // Step 1: Parse query with Claude
   let clientProfile;
   try {
     clientProfile = await parseSearchQuery(queryText);
@@ -98,60 +182,45 @@ async function handleNewSearch(queryText) {
   const locations = hardFilters.locations || [];
   const locationStr = locations.length > 0 ? locations.join(', ') : 'onbekend';
 
-  // Step 2: Search all portals
   console.log(`[${ts}] [API] Searching for: ${locationStr}`);
 
   const [idealistaListings, supabaseListings] = await Promise.allSettled([
     searchIdealista(hardFilters),
     searchSupabase(hardFilters),
-  ]).then(([idealista, supabase]) => {
-    return [
-      idealista.status === 'fulfilled' ? idealista.value : [],
-      supabase.status === 'fulfilled' ? supabase.value : [],
-    ];
-  });
+  ]).then(([idealista, supabase]) => [
+    idealista.status === 'fulfilled' ? idealista.value : [],
+    supabase.status === 'fulfilled' ? supabase.value : [],
+  ]);
 
   const allRaw = [...idealistaListings, ...supabaseListings];
 
   if (allRaw.length === 0) {
     return {
-      response: `Ik heb gezocht in ${locationStr} maar kon geen woningen vinden die aan je criteria voldoen. Probeer je zoekopdracht aan te passen (bijv. ander budget of andere locatie).`,
-      sessionId,
-      properties: [],
+      response: `Ik heb gezocht in ${locationStr} maar kon geen woningen vinden die aan je criteria voldoen. Probeer je zoekopdracht aan te passen.`,
+      sessionId, properties: [],
     };
   }
 
-  // Step 3: Deduplicate and filter
   const deduplicated = deduplicateListings(allRaw);
   const allProperties = preFilterListings(deduplicated, hardFilters);
 
   if (allProperties.length === 0) {
     return {
       response: `Ik vond ${allRaw.length} woningen, maar geen daarvan voldoet aan je harde criteria. Probeer ruimere filters.`,
-      sessionId,
-      properties: [],
+      sessionId, properties: [],
     };
   }
 
-  // Step 4: AI selection
   let selectionResult;
   try {
     selectionResult = await selectProperties(clientProfile, allProperties);
   } catch (err) {
     console.error(`[${ts}] [API] Selection failed:`, err.message);
-    return {
-      response: 'De AI-selectie is mislukt. Probeer het opnieuw.',
-      sessionId,
-    };
+    return { response: 'De AI-selectie is mislukt. Probeer het opnieuw.', sessionId };
   }
 
-  const selections = postValidateSelections(
-    selectionResult.selections || [],
-    allProperties,
-    hardFilters
-  );
+  const selections = postValidateSelections(selectionResult.selections || [], allProperties, hardFilters);
 
-  // Step 5: Enrich selected properties with details
   try {
     const selectedProps = selections.map(s =>
       allProperties.find(p => p.id === s.property_id || p.url === s.property_id || String(p.id) === String(s.property_id))
@@ -161,7 +230,6 @@ async function handleNewSearch(queryText) {
     console.warn(`[${ts}] [API] Detail enrichment failed (non-fatal):`, err.message);
   }
 
-  // Store session
   setThread(sessionId, {
     client_profile: clientProfile,
     all_properties: allProperties.map(p => ({
@@ -170,16 +238,468 @@ async function handleNewSearch(queryText) {
       size_m2: p.size_m2, features: p.features, url: p.url, source: p.source,
       thumbnail: p.thumbnail, is_new_build: p.is_new_build, municipality: p.municipality,
     })),
-    current_selection: selections,
-    photo_assessments: {},
-    conversation_history: [],
-    original_query: queryText,
-    created_at: Date.now(),
-    type: 'api',
+    current_selection: selections, photo_assessments: {},
+    conversation_history: [], original_query: queryText,
+    created_at: Date.now(), type: 'api',
   });
 
-  // Build response
-  const properties = selections.map(s => {
+  const properties = mapSelections(selections, allProperties);
+  const summary = selectionResult.summary || `${selections.length} woningen gevonden in ${locationStr}`;
+
+  return {
+    response: summary, sessionId, properties,
+    stats: { total_found: allRaw.length, after_filter: allProperties.length, selected: selections.length },
+  };
+}
+
+// ─── Handler: Nieuwbouw ────────────────────────────────────────────────────
+
+async function handleNieuwbouw(queryText) {
+  const ts = new Date().toISOString();
+
+  let clientProfile;
+  try {
+    clientProfile = await parseSearchQuery(queryText);
+  } catch (err) {
+    return { response: 'Ik kon je nieuwbouw-zoekopdracht niet begrijpen. Probeer: "nieuwbouw Costa del Sol, 2 slpk, max 300k"' };
+  }
+
+  const hardFilters = { ...(clientProfile.hard_filters || {}), is_new_build: true };
+
+  const [idealistaListings, supabaseListings] = await Promise.allSettled([
+    searchIdealista(hardFilters),
+    searchSupabase(hardFilters),
+  ]).then(([idealista, supabase]) => [
+    idealista.status === 'fulfilled' ? idealista.value : [],
+    supabase.status === 'fulfilled' ? supabase.value : [],
+  ]);
+
+  const allRaw = [...idealistaListings, ...supabaseListings].filter(p => p.is_new_build !== false);
+  if (allRaw.length === 0) {
+    return { response: 'Geen nieuwbouwprojecten gevonden voor deze criteria. Probeer een andere locatie of ruimer budget.' };
+  }
+
+  const deduplicated = deduplicateListings(allRaw);
+  const allProperties = preFilterListings(deduplicated, hardFilters);
+
+  let selectionResult;
+  try {
+    selectionResult = await selectProperties(clientProfile, allProperties);
+  } catch (err) {
+    return { response: 'De selectie is mislukt. Probeer het opnieuw.' };
+  }
+
+  const selections = selectionResult.selections || [];
+  const properties = mapSelections(selections, allProperties);
+
+  return {
+    response: selectionResult.summary || `${selections.length} nieuwbouwprojecten gevonden`,
+    properties,
+    stats: { total_found: allRaw.length, after_filter: allProperties.length, selected: selections.length },
+  };
+}
+
+// ─── Handler: Vergelijk ────────────────────────────────────────────────────
+
+async function handleVergelijk(queryText) {
+  const ts = new Date().toISOString();
+
+  // Extract URLs or refs from query
+  const urls = queryText.match(/https?:\/\/[^\s]+/g) || [];
+  const refs = queryText.match(/\b\d{5,8}\b/g) || [];
+  const inputs = [...urls, ...refs];
+
+  if (inputs.length < 2) {
+    return { response: 'Geef minimaal 2 woningen op om te vergelijken. Gebruik URLs of referentienummers.\n\nBijvoorbeeld: "Vergelijk https://idealista.com/inmueble/123 en https://idealista.com/inmueble/456"' };
+  }
+
+  // Resolve properties
+  const properties = [];
+  for (const input of inputs.slice(0, 3)) {
+    try {
+      let prop = null;
+      if (input.includes('idealista.com')) {
+        prop = await lookupIdealista(input);
+      } else if (input.includes('costaselect.com')) {
+        prop = await scrapeCostaSelectPage(input);
+      } else {
+        // Try as ref number from Supabase
+        prop = await lookupProperty(input);
+      }
+      if (prop) properties.push(prop);
+    } catch (err) {
+      console.warn(`[${ts}] [API] Could not resolve: ${input}:`, err.message);
+    }
+  }
+
+  if (properties.length < 2) {
+    return { response: `Kon slechts ${properties.length} van de ${inputs.length} woningen ophalen. Controleer de URLs/referenties.` };
+  }
+
+  // Build comparison with Claude
+  const propDescriptions = properties.map((p, i) => {
+    const details = [
+      `Woning ${i + 1}: ${p.title || p.ref || 'Onbekend'}`,
+      p.price ? `Prijs: €${Number(p.price).toLocaleString('nl-NL')}` : null,
+      p.location || p.town ? `Locatie: ${p.location || p.town}` : null,
+      p.bedrooms || p.beds ? `Slaapkamers: ${p.bedrooms || p.beds}` : null,
+      p.bathrooms || p.baths ? `Badkamers: ${p.bathrooms || p.baths}` : null,
+      p.size_m2 || p.built_m2 ? `Oppervlakte: ${p.size_m2 || p.built_m2}m²` : null,
+      p.features ? `Kenmerken: ${Array.isArray(p.features) ? p.features.join(', ') : p.features}` : null,
+      p.url ? `URL: ${p.url}` : null,
+    ].filter(Boolean).join('\n');
+    return details;
+  }).join('\n\n');
+
+  const comparison = await claudeRetry(() => claude.messages.create({
+    model: CLAUDE_MODEL,
+    max_tokens: 1500,
+    messages: [{
+      role: 'user',
+      content: `Je bent een ervaren Spaanse vastgoedadviseur. Vergelijk deze woningen voor een Nederlandse koper. Geef een duidelijke vergelijking met plus- en minpunten per woning en een conclusie. Antwoord in het Nederlands.\n\n${propDescriptions}`,
+    }],
+  }));
+
+  const answer = comparison.content[0].text;
+
+  return {
+    response: answer,
+    properties: properties.map(p => ({
+      id: p.ref || p.id || '',
+      title: p.title || `${p.property_type || 'Woning'} in ${p.town || p.location || ''}`,
+      price: p.price || null,
+      location: p.location || p.town || '',
+      bedrooms: p.bedrooms || p.beds || null,
+      bathrooms: p.bathrooms || p.baths || null,
+      size_m2: p.size_m2 || p.built_m2 || null,
+      url: p.url || '',
+      thumbnail: p.thumbnail || (p.images && p.images[0]?.url) || null,
+      source: p.source || '',
+      motivation: '',
+      score: null,
+    })),
+  };
+}
+
+// ─── Handler: Pitch ────────────────────────────────────────────────────────
+
+async function handlePitch(queryText) {
+  const ts = new Date().toISOString();
+
+  // Extract URL or ref
+  const urlMatch = queryText.match(/https?:\/\/[^\s]+/);
+  const refMatch = queryText.match(/\b\d{5,8}\b/);
+  const input = urlMatch?.[0] || refMatch?.[0];
+
+  if (!input) {
+    return { response: 'Geef een woning-URL of referentienummer op.\n\nBijvoorbeeld: "Pitch voor https://idealista.com/inmueble/123" of "Pitch voor 771846"' };
+  }
+
+  // Resolve property
+  let prop = null;
+  try {
+    if (input.includes('idealista.com')) {
+      prop = await lookupIdealista(input);
+    } else if (input.includes('costaselect.com')) {
+      prop = await scrapeCostaSelectPage(input);
+    } else {
+      prop = await lookupProperty(input);
+    }
+  } catch (err) {
+    console.warn(`[${ts}] [API] Pitch lookup failed:`, err.message);
+  }
+
+  if (!prop) {
+    return { response: `Kon de woning niet ophalen: ${input}. Controleer de URL of het referentienummer.` };
+  }
+
+  // Extract buyer context from query (everything after the URL/ref)
+  const buyerContext = queryText.replace(input, '').replace(/pitch|voor|maak/gi, '').trim();
+
+  const propDetails = [
+    prop.title || `${prop.property_type || 'Woning'} in ${prop.town || ''}`,
+    prop.price ? `Prijs: €${Number(prop.price).toLocaleString('nl-NL')}` : null,
+    prop.location || prop.town ? `Locatie: ${prop.location || prop.town}${prop.province ? `, ${prop.province}` : ''}` : null,
+    prop.bedrooms || prop.beds ? `Slaapkamers: ${prop.bedrooms || prop.beds}` : null,
+    prop.size_m2 || prop.built_m2 ? `Woonoppervlakte: ${prop.size_m2 || prop.built_m2}m²` : null,
+    prop.plot_m2 ? `Perceel: ${prop.plot_m2}m²` : null,
+    prop.features ? `Kenmerken: ${Array.isArray(prop.features) ? prop.features.join(', ') : prop.features}` : null,
+    prop.desc_nl || prop.description ? `Beschrijving: ${(prop.desc_nl || prop.description || '').substring(0, 500)}` : null,
+  ].filter(Boolean).join('\n');
+
+  const pitchResponse = await claudeRetry(() => claude.messages.create({
+    model: CLAUDE_MODEL,
+    max_tokens: 2000,
+    messages: [{
+      role: 'user',
+      content: `Je bent een senior vastgoedconsultant van Costa Select, een Nederlandse aankoopmakelaar in Spanje. Schrijf een overtuigende, professionele pitch voor deze woning. De pitch is bedoeld om aan een potentiële koper te sturen.
+
+${buyerContext ? `Koperprofiel: ${buyerContext}\n` : ''}
+Woninggegevens:
+${propDetails}
+
+Schrijf de pitch in het Nederlands. Maak het persoonlijk, professioneel en overtuigend. Benadruk de sterke punten en de unieke waardepropositie.`,
+    }],
+  }));
+
+  return {
+    response: pitchResponse.content[0].text,
+    properties: [{
+      id: prop.ref || prop.id || '',
+      title: prop.title || `${prop.property_type || 'Woning'} in ${prop.town || ''}`,
+      price: prop.price || null,
+      location: prop.location || prop.town || '',
+      bedrooms: prop.bedrooms || prop.beds || null,
+      bathrooms: prop.bathrooms || prop.baths || null,
+      size_m2: prop.size_m2 || prop.built_m2 || null,
+      url: prop.url || '',
+      thumbnail: prop.thumbnail || (prop.images && prop.images[0]?.url) || null,
+      source: prop.source || '',
+      motivation: '', score: null,
+    }],
+  };
+}
+
+// ─── Handler: Buurt ────────────────────────────────────────────────────────
+
+async function handleBuurt(queryText) {
+  const location = queryText.trim();
+  if (!location) {
+    return { response: 'Geef een locatie op. Bijvoorbeeld: "Buurt Jávea" of "Buurt Estepona"' };
+  }
+
+  // Get price data if available
+  let priceContext = '';
+  try {
+    const priceData = await getPricesForLocation(location);
+    if (priceData && priceData.length > 0) {
+      priceContext = `\n\nMarktdata (Engel & Völkers):\n${formatPriceDataForClaude(priceData)}`;
+    }
+  } catch (err) {
+    console.warn('[API] Price data for buurt failed:', err.message);
+  }
+
+  const buurtResponse = await claudeRetry(() => claude.messages.create({
+    model: CLAUDE_MODEL,
+    max_tokens: 2000,
+    messages: [{
+      role: 'user',
+      content: `Je bent een expert in Spaans vastgoed en lokale wijken. Geef een uitgebreide buurtanalyse voor "${location}". Antwoord in het Nederlands.
+
+Behandel:
+1. Algemene sfeer en karakter van de buurt/stad
+2. Type bewoners (expats, lokaal, toeristen, gepensioneerden)
+3. Voorzieningen (supermarkten, restaurants, ziekenhuizen, scholen)
+4. Bereikbaarheid (vliegveld, snelweg, OV)
+5. Sterke punten voor Nederlandse kopers
+6. Aandachtspunten of nadelen
+7. Prijsindicatie en marktsituatie${priceContext}`,
+    }],
+  }));
+
+  return { response: buurtResponse.content[0].text };
+}
+
+// ─── Handler: Prijs ────────────────────────────────────────────────────────
+
+async function handlePrijs(queryText) {
+  const location = queryText.trim();
+  if (!location) {
+    return { response: 'Geef een locatie op. Bijvoorbeeld: "Prijs Marbella" of "Prijzen Costa del Sol"' };
+  }
+
+  let priceData = null;
+  let historyData = null;
+  try {
+    priceData = await getPricesForLocation(location);
+    historyData = await getPriceHistory(location);
+  } catch (err) {
+    console.warn('[API] Price data failed:', err.message);
+  }
+
+  if (!priceData || priceData.length === 0) {
+    return { response: `Geen marktdata beschikbaar voor "${location}". Probeer een andere locatie (bijv. een stad of regio in Spanje).` };
+  }
+
+  const priceContext = formatPriceDataForClaude(priceData);
+  const historyContext = historyData && historyData.length > 0
+    ? `\n\nHistorische data:\n${historyData.map(h => `${h.year} Q${h.quarter}: €${h.price_per_sqm}/m² (${h.yoy_change_pct > 0 ? '+' : ''}${h.yoy_change_pct}%)`).join('\n')}`
+    : '';
+
+  const prijsResponse = await claudeRetry(() => claude.messages.create({
+    model: CLAUDE_MODEL,
+    max_tokens: 1500,
+    messages: [{
+      role: 'user',
+      content: `Je bent een vastgoedmarktanalist gespecialiseerd in Spanje. Analyseer de marktdata voor "${location}" en geef een helder overzicht voor een Nederlandse koper/investeerder. Antwoord in het Nederlands.
+
+Marktdata (bron: Engel & Völkers):
+${priceContext}${historyContext}
+
+Geef:
+1. Huidige gemiddelde prijzen (koop en eventueel huur)
+2. Prijsontwikkeling
+3. Vergelijking met omliggende gebieden als relevant
+4. Advies voor kopers/investeerders`,
+    }],
+  }));
+
+  return { response: prijsResponse.content[0].text };
+}
+
+// ─── Handler: Klant ────────────────────────────────────────────────────────
+
+async function handleKlant(queryText) {
+  const input = queryText.trim().toLowerCase();
+
+  if (input === 'lijst' || input === 'alle' || input === 'all') {
+    try {
+      const clients = await getAllClients();
+      if (!clients || clients.length === 0) {
+        return { response: 'Geen klanten gevonden.' };
+      }
+      const list = clients.map(c => `• ${c.client_name} (${c.count || '?'} woningen)`).join('\n');
+      return { response: `**Alle klanten:**\n\n${list}` };
+    } catch (err) {
+      return { response: 'Kon de klantenlijst niet ophalen.' };
+    }
+  }
+
+  // Specific client
+  const clientName = queryText.trim();
+  if (!clientName) {
+    return { response: 'Geef een klantnaam op of typ "lijst" voor alle klanten.\n\nBijvoorbeeld: "Klant Jan Janssen"' };
+  }
+
+  try {
+    const properties = await getClientProperties(clientName);
+    if (!properties || properties.length === 0) {
+      return { response: `Geen opgeslagen woningen gevonden voor "${clientName}".` };
+    }
+
+    const propList = properties.map(row => {
+      const p = row.property || {};
+      return [
+        p.price ? `€${Number(p.price).toLocaleString('nl-NL')}` : '',
+        p.property_type || '',
+        p.town || '',
+        p.beds ? `${p.beds} slpk` : '',
+        row.note ? `📝 ${row.note}` : '',
+        row.url ? row.url : '',
+      ].filter(Boolean).join(' · ');
+    }).join('\n');
+
+    return { response: `**Shortlist van ${clientName}** (${properties.length} woningen):\n\n${propList}` };
+  } catch (err) {
+    return { response: `Kon de shortlist van "${clientName}" niet ophalen.` };
+  }
+}
+
+// ─── Handler: Alert ────────────────────────────────────────────────────────
+
+async function handleAlert(queryText) {
+  const input = queryText.trim().toLowerCase();
+
+  if (input === 'lijst' || input === 'bekijk' || input === 'show') {
+    return { response: 'Alerts bekijken is momenteel alleen beschikbaar via Slack (/alert lijst). Web-interface volgt binnenkort.' };
+  }
+
+  if (input.startsWith('stop')) {
+    return { response: 'Alerts stoppen is momenteel alleen beschikbaar via Slack (/alert stop). Web-interface volgt binnenkort.' };
+  }
+
+  // Create alert — parse with Claude
+  try {
+    const parseResponse = await claudeRetry(() => claude.messages.create({
+      model: CLAUDE_MODEL,
+      max_tokens: 300,
+      messages: [{
+        role: 'user',
+        content: `Parse deze alert-criteria naar JSON. Geef ALLEEN JSON terug:\n{"location": string|null, "min_price": number|null, "max_price": number|null, "min_rooms": number|null, "has_pool": boolean|null, "has_sea_view": boolean|null}\n\nCriteria: "${queryText}"`,
+      }],
+    }));
+
+    const text = parseResponse.content[0].text;
+    const criteria = JSON.parse(text.match(/\{[\s\S]*\}/)?.[0] || '{}');
+
+    if (!criteria.location) {
+      return { response: 'Geef een locatie op voor de alert. Bijvoorbeeld: "Alert nieuwbouw Estepona, max 400k, 2 slpk"' };
+    }
+
+    return {
+      response: `Alert-criteria herkend:\n• Locatie: ${criteria.location}\n${criteria.max_price ? `• Max. prijs: €${criteria.max_price.toLocaleString('nl-NL')}\n` : ''}${criteria.min_rooms ? `• Min. slaapkamers: ${criteria.min_rooms}\n` : ''}\nAlerts aanmaken via het platform wordt binnenkort ondersteund. Gebruik voorlopig /alert in Slack.`,
+    };
+  } catch (err) {
+    return { response: 'Kon de alert-criteria niet verwerken. Probeer: "Alert nieuwbouw Estepona, max 400k"' };
+  }
+}
+
+// ─── Handler: Algemeen ─────────────────────────────────────────────────────
+
+async function handleAlgemeen(message) {
+  const response = await claudeRetry(() => claude.messages.create({
+    model: CLAUDE_MODEL,
+    max_tokens: 1000,
+    system: `Je bent WoningBot, de AI-assistent van Costa Select — een Nederlandse aankoopmakelaar in Spanje. Je helpt consultants met het zoeken en beoordelen van Spaans vastgoed. Antwoord altijd in het Nederlands en wees beknopt maar behulpzaam.
+
+Je kunt helpen met:
+• Woningen zoeken (bijv. "villa in Estepona, 3 slpk, 500k")
+• Nieuwbouw zoeken (bijv. "nieuwbouw Costa del Sol")
+• Woningen vergelijken (geef 2+ URLs)
+• Verkooppitch maken (geef een URL of referentienummer)
+• Buurtinformatie (bijv. "buurt Jávea")
+• Prijsanalyse (bijv. "prijzen Marbella")
+• Klant-shortlists bekijken
+• Alerts instellen`,
+    messages: [{ role: 'user', content: message }],
+  }));
+
+  return { response: response.content[0].text };
+}
+
+// ─── Handler: Refinement (existing) ────────────────────────────────────────
+
+async function handleRefinement(sessionId, threadData, feedback) {
+  const ts = new Date().toISOString();
+  addConversation(sessionId, 'consultant', feedback);
+
+  const refinement = await refineSelection(threadData, feedback);
+
+  if (refinement.needs_new_scrape && refinement.new_filters) {
+    const mergedFilters = { ...threadData.client_profile.hard_filters, ...refinement.new_filters };
+    let idealistaListings = [], supabaseListings = [];
+    try {
+      [idealistaListings, supabaseListings] = await Promise.all([
+        searchIdealista(mergedFilters), searchSupabase(mergedFilters),
+      ]);
+    } catch (err) {
+      console.error(`[${ts}] [API] Re-scrape failed:`, err.message);
+    }
+
+    const combined = [...threadData.all_properties, ...idealistaListings, ...supabaseListings];
+    const deduped = deduplicateListings(combined);
+    const updatedProfile = { ...threadData.client_profile, hard_filters: mergedFilters };
+    updateThread(sessionId, { all_properties: deduped, client_profile: updatedProfile });
+
+    const reselection = await selectProperties(updatedProfile, deduped);
+    const selections = reselection.selections || [];
+    updateThread(sessionId, { current_selection: selections });
+    addConversation(sessionId, 'bot', refinement.response_to_consultant || 'Selectie aangepast.');
+
+    return { response: refinement.response_to_consultant || 'Selectie aangepast.', sessionId, properties: mapSelections(selections, deduped) };
+  }
+
+  const selections = refinement.selections || [];
+  updateThread(sessionId, { current_selection: selections });
+  addConversation(sessionId, 'bot', refinement.response_to_consultant || 'Selectie aangepast.');
+
+  return { response: refinement.response_to_consultant || 'Selectie aangepast.', sessionId, properties: mapSelections(selections, threadData.all_properties) };
+}
+
+// ─── Helpers ───────────────────────────────────────────────────────────────
+
+function mapSelections(selections, allProperties) {
+  return selections.map(s => {
     const prop = allProperties.find(p =>
       p.id === s.property_id || p.url === s.property_id || String(p.id) === String(s.property_id)
     );
@@ -198,122 +718,11 @@ async function handleNewSearch(queryText) {
       score: s.score || null,
     };
   });
-
-  const summary = selectionResult.summary || `${selections.length} woningen gevonden in ${locationStr}`;
-
-  return {
-    response: summary,
-    sessionId,
-    properties,
-    stats: {
-      total_found: allRaw.length,
-      after_filter: allProperties.length,
-      selected: selections.length,
-    },
-  };
-}
-
-/**
- * Handle a refinement in an existing session (equivalent to thread reply)
- */
-async function handleRefinement(sessionId, threadData, feedback) {
-  const ts = new Date().toISOString();
-
-  addConversation(sessionId, 'consultant', feedback);
-
-  const refinement = await refineSelection(threadData, feedback);
-
-  if (refinement.needs_new_scrape && refinement.new_filters) {
-    // Run new scrape with updated filters
-    const mergedFilters = { ...threadData.client_profile.hard_filters, ...refinement.new_filters };
-
-    let idealistaListings = [];
-    let supabaseListings = [];
-    try {
-      [idealistaListings, supabaseListings] = await Promise.all([
-        searchIdealista(mergedFilters),
-        searchSupabase(mergedFilters),
-      ]);
-    } catch (err) {
-      console.error(`[${ts}] [API] Re-scrape failed:`, err.message);
-    }
-
-    const newListings = [...idealistaListings, ...supabaseListings];
-    const combined = [...threadData.all_properties, ...newListings];
-    const deduped = deduplicateListings(combined);
-
-    const updatedProfile = { ...threadData.client_profile, hard_filters: mergedFilters };
-    updateThread(sessionId, { all_properties: deduped, client_profile: updatedProfile });
-
-    const { selectProperties } = require('./services/claude-selector');
-    const reselection = await selectProperties(updatedProfile, deduped);
-    const selections = reselection.selections || [];
-
-    updateThread(sessionId, { current_selection: selections });
-    addConversation(sessionId, 'bot', refinement.response_to_consultant || 'Selectie aangepast.');
-
-    const properties = selections.map(s => {
-      const prop = deduped.find(p =>
-        p.id === s.property_id || p.url === s.property_id || String(p.id) === String(s.property_id)
-      );
-      return {
-        id: s.property_id,
-        title: prop?.title || 'Onbekend',
-        price: prop?.price || null,
-        location: prop?.location || '',
-        bedrooms: prop?.bedrooms || null,
-        bathrooms: prop?.bathrooms || null,
-        size_m2: prop?.size_m2 || null,
-        url: prop?.url || '',
-        thumbnail: prop?.thumbnail || null,
-        source: prop?.source || '',
-        motivation: s.motivation || '',
-        score: s.score || null,
-      };
-    });
-
-    return {
-      response: refinement.response_to_consultant || 'Selectie aangepast met nieuwe resultaten.',
-      sessionId,
-      properties,
-    };
-  }
-
-  // No new scrape — just refined selection
-  const selections = refinement.selections || [];
-  updateThread(sessionId, { current_selection: selections });
-  addConversation(sessionId, 'bot', refinement.response_to_consultant || 'Selectie aangepast.');
-
-  const properties = selections.map(s => {
-    const prop = threadData.all_properties.find(p =>
-      p.id === s.property_id || p.url === s.property_id || String(p.id) === String(s.property_id)
-    );
-    return {
-      id: s.property_id,
-      title: prop?.title || 'Onbekend',
-      price: prop?.price || null,
-      location: prop?.location || '',
-      bedrooms: prop?.bedrooms || null,
-      bathrooms: prop?.bathrooms || null,
-      size_m2: prop?.size_m2 || null,
-      url: prop?.url || '',
-      thumbnail: prop?.thumbnail || null,
-      source: prop?.source || '',
-      motivation: s.motivation || '',
-      score: s.score || null,
-    };
-  });
-
-  return {
-    response: refinement.response_to_consultant || 'Selectie aangepast.',
-    sessionId,
-    properties,
-  };
 }
 
 function startApiServer() {
   const port = process.env.API_PORT || 3001;
-  app.listen(port, () => {
+  expressApp.listen(port, () => {
     console.log(`🌐 WoningBot API running on port ${port}`);
   });
 }
