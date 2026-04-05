@@ -1,6 +1,7 @@
 const { getThread, updateThread, addConversation } = require('../store/thread-memory');
 const { refineSelection } = require('../services/claude-refiner');
 const { searchIdealista } = require('../services/idealista-direct');
+const { searchSupabase } = require('../services/supabase-search');
 // const { searchThinkSpain } = require('../services/thinkspain');  // Temporarily disabled
 const { analyzeSelectedPhotos } = require('../services/claude-vision');
 const { deduplicateListings } = require('../services/dedup');
@@ -23,7 +24,7 @@ async function handleThreadReply({ event, client, context }) {
   if (event.bot_id || event.subtype === 'bot_message') return;
 
   // Check if we have thread data for this thread
-  const threadData = getThread(event.thread_ts);
+  const threadData = await getThread(event.thread_ts);
   if (!threadData) return; // Not our thread
 
   const feedback = event.text?.trim();
@@ -92,13 +93,17 @@ async function handleThreadReply({ event, client, context }) {
       // Run new scrape (ThinkSpain temporarily disabled)
       try {
         let idealistaListings = [];
+        let supabaseListings = [];
         try {
-          idealistaListings = await searchIdealista(mergedFilters);
+          [idealistaListings, supabaseListings] = await Promise.all([
+            searchIdealista(mergedFilters),
+            searchSupabase(mergedFilters),
+          ]);
         } catch (err) {
-          console.error(`[${ts}] [ThreadReply] Idealista re-scrape failed:`, err.message);
+          console.error(`[${ts}] [ThreadReply] Re-scrape failed:`, err.message);
         }
 
-        const newListings = [...idealistaListings];
+        const newListings = [...idealistaListings, ...supabaseListings];
 
         const combined = [...threadData.all_properties, ...newListings];
         const deduped = deduplicateListings(combined);

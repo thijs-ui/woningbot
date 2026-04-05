@@ -253,7 +253,7 @@ function mapApifyItem(item) {
 
     // Skip items without price or URL
     const price = item.price || get('priceInfo.price.amount') || null;
-    const url = item.url || null;
+    let url = item.url || null;
     if (!price || !url) return null;
 
     // ID
@@ -261,6 +261,12 @@ function mapApifyItem(item) {
 
     // Location
     const city = item.municipality || '';
+
+    // Fix obra-nueva URLs missing the municipality slug (e.g. /obra-nueva/123/ → /obra-nueva-marbella/123/)
+    if (url.includes('/obra-nueva/') && city) {
+      const slug = city.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
+      url = url.replace('/obra-nueva/', `/obra-nueva-${slug}/`);
+    }
     const province = item.province || '';
     const address = item.address || '';
     const district = item.district || '';

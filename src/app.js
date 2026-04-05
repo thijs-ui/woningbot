@@ -14,6 +14,7 @@ const { handlePitch } = require('./handlers/pitch');
 const { handleBuurt } = require('./handlers/buurt');
 const { handleKlant, handleRemoveClientProperty } = require('./handlers/klant');
 const { runAlertCheck } = require('./jobs/alert-check');
+const { startApiServer } = require('./api');
 
 const app = new App({
   token: process.env.SLACK_BOT_TOKEN,
@@ -72,4 +73,7 @@ app.error(async (error) => {
     runAlertCheck(app).catch(err => console.error(`[${ts}] [Cron] Alert check error:`, err));
   });
   console.log('⏰ Alert check scheduled: daily at 07:00 UTC (08:00 CET)');
+
+  // Start REST API server alongside Slack bot
+  startApiServer();
 })();

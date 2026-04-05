@@ -24,15 +24,18 @@
   ],
   "author": "Costa Select",
   "license": "MIT",
-"dependencies": {
+  "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",
     "@slack/bolt": "^4.1.0",
     "apify-client": "^2.22.3",
     "cheerio": "^1.2.0",
+    "cors": "^2.8.6",
     "dotenv": "^16.4.7",
+    "express": "^5.2.1",
     "googleapis": "^144.0.0",
-    "node-cron": "^3.0.3"
-},
+    "node-cron": "^3.0.3",
+    "uuid": "^13.0.0"
+  },
   "engines": {
     "node": ">=20.0.0"
   }

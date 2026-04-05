@@ -339,8 +339,9 @@ async function sendResalesNotification(app, alert, properties) {
     const thumbnail = images[0] || null;
     const desc = (p.desc_nl || p.desc_en || '').substring(0, 120);
 
+    const title = `${p.property_type || 'Property'} in ${p.town || p.province || '?'}`;
     const textLines = [
-      `*${p.property_type || 'Property'} in ${p.town || p.province || '?'}*`,
+      p.url ? `*<${p.url}|${title}>*` : `*${title}*`,
       `📍 ${[p.town, p.province].filter(Boolean).join(', ')}`,
       `💶 €${Number(p.price || 0).toLocaleString('nl-NL')}  🛏 ${p.beds || '?'} slpk  📐 ${p.built_m2 || '?'}m²`,
       p.pool ? '🏊 Zwembad' : '',

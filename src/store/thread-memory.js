@@ -1,171 +1,106 @@
-const fs = require('fs');
-const path = require('path');
+const https = require('https');
 
-/**
- * Thread memory with JSON file persistence.
- * Data survives Railway restarts.
- *
- * Key: thread_ts (string)
- * Value: {
- *   client_profile: object,
- *   all_properties: array,
- *   current_selection: array,
- *   photo_assessments: object,
- *   conversation_history: array,
- *   channel_id: string,
- *   original_query: string,
- *   created_at: number,
- * }
- */
-
-const STORE_DIR = path.join(process.cwd(), '.thread-store');
+const SUPABASE_URL = (process.env.SUPABASE_URL || 'https://sqafsrknbfzhkbxqhqlu.supabase.co').replace(/\/$/, '');
+const SUPABASE_KEY = process.env.SUPABASE_ANON_KEY || '';
 const MAX_AGE_MS = 48 * 60 * 60 * 1000; // 48 hours
 
-// Ensure store directory exists
-try {
-  if (!fs.existsSync(STORE_DIR)) {
-    fs.mkdirSync(STORE_DIR, { recursive: true });
-  }
-} catch (e) {
-  console.warn('[ThreadMemory] Could not create store dir, falling back to memory-only:', e.message);
+// In-memory cache for fast repeated access within a session
+const cache = new Map();
+
+function sbReq(method, path, body, extraHeaders = {}) {
+  return new Promise((resolve, reject) => {
+    const url = new URL(`/rest/v1/${path}`, SUPABASE_URL);
+    const bodyStr = body ? JSON.stringify(body) : null;
+    const headers = {
+      apikey: SUPABASE_KEY,
+      Authorization: `Bearer ${SUPABASE_KEY}`,
+      'Content-Type': 'application/json',
+      ...extraHeaders,
+    };
+    if (bodyStr) headers['Content-Length'] = Buffer.byteLength(bodyStr);
+
+    const req = https.request({
+      hostname: url.hostname,
+      path: url.pathname + url.search,
+      method,
+      headers,
+    }, (res) => {
+      let data = '';
+      res.on('data', c => data += c);
+      res.on('end', () => {
+        try { resolve({ status: res.statusCode, body: data ? JSON.parse(data) : null }); }
+        catch (e) { reject(new Error(`Parse error: ${e.message}`)); }
+      });
+    });
+    req.on('error', reject);
+    req.setTimeout(10000, () => { req.destroy(); reject(new Error('Supabase timeout')); });
+    if (bodyStr) req.write(bodyStr);
+    req.end();
+  });
 }
 
-// In-memory cache
-const threads = new Map();
-
-/**
- * Sanitize thread_ts for use as filename.
- */
-function tsToFilename(threadTs) {
-  return threadTs.replace(/[^a-zA-Z0-9.-]/g, '_') + '.json';
+function persist(threadTs, data) {
+  sbReq('POST', 'thread_store?on_conflict=thread_ts', {
+    thread_ts: threadTs,
+    data,
+    created_at: data.created_at || Date.now(),
+    expires_at: new Date(Date.now() + MAX_AGE_MS).toISOString(),
+  }, { Prefer: 'resolution=merge-duplicates,return=minimal' })
+    .catch(e => console.warn('[ThreadMemory] Write failed:', e.message));
 }
 
-/**
- * Persist a thread to disk (async, non-blocking).
- */
-function persistToDisk(threadTs, data) {
+async function getThread(threadTs) {
+  if (cache.has(threadTs)) return cache.get(threadTs);
+
   try {
-    const filePath = path.join(STORE_DIR, tsToFilename(threadTs));
-    fs.writeFileSync(filePath, JSON.stringify(data), 'utf8');
-  } catch (e) {
-    console.warn(`[ThreadMemory] Failed to persist thread ${threadTs}:`, e.message);
-  }
-}
-
-/**
- * Load a thread from disk.
- */
-function loadFromDisk(threadTs) {
-  try {
-    const filePath = path.join(STORE_DIR, tsToFilename(threadTs));
-    if (fs.existsSync(filePath)) {
-      const raw = fs.readFileSync(filePath, 'utf8');
-      return JSON.parse(raw);
+    const res = await sbReq('GET', `thread_store?thread_ts=eq.${encodeURIComponent(threadTs)}&select=data`);
+    if (res.status === 200 && res.body?.length) {
+      const data = res.body[0].data;
+      if ((data.created_at || 0) > Date.now() - MAX_AGE_MS) {
+        cache.set(threadTs, data);
+        return data;
+      }
     }
   } catch (e) {
-    console.warn(`[ThreadMemory] Failed to load thread ${threadTs} from disk:`, e.message);
-  }
-  return null;
-}
-
-function getThread(threadTs) {
-  // Check memory first
-  if (threads.has(threadTs)) {
-    return threads.get(threadTs);
-  }
-  // Try disk
-  const fromDisk = loadFromDisk(threadTs);
-  if (fromDisk) {
-    threads.set(threadTs, fromDisk); // Cache in memory
-    return fromDisk;
+    console.warn('[ThreadMemory] Read failed:', e.message);
   }
   return null;
 }
 
 function setThread(threadTs, data) {
-  threads.set(threadTs, data);
-  persistToDisk(threadTs, data);
+  cache.set(threadTs, data);
+  persist(threadTs, data);
 }
 
-function updateThread(threadTs, updates) {
-  const existing = getThread(threadTs);
+async function updateThread(threadTs, updates) {
+  const existing = cache.get(threadTs) || await getThread(threadTs);
   if (!existing) return false;
   const updated = { ...existing, ...updates };
-  threads.set(threadTs, updated);
-  persistToDisk(threadTs, updated);
+  cache.set(threadTs, updated);
+  persist(threadTs, updated);
   return true;
 }
 
-function addConversation(threadTs, role, text) {
-  const existing = getThread(threadTs);
+async function addConversation(threadTs, role, text) {
+  const existing = cache.get(threadTs) || await getThread(threadTs);
   if (!existing) return false;
   existing.conversation_history.push({ role, text, timestamp: new Date().toISOString() });
-  persistToDisk(threadTs, existing);
+  persist(threadTs, existing);
   return true;
 }
 
 function deleteThread(threadTs) {
-  threads.delete(threadTs);
-  try {
-    const filePath = path.join(STORE_DIR, tsToFilename(threadTs));
-    if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
-  } catch (e) { /* ignore */ }
+  cache.delete(threadTs);
+  sbReq('DELETE', `thread_store?thread_ts=eq.${encodeURIComponent(threadTs)}`)
+    .catch(e => console.warn('[ThreadMemory] Delete failed:', e.message));
 }
 
-// Clean up old threads every hour (both memory and disk)
+// Periodic in-memory cache cleanup
 setInterval(() => {
   const cutoff = Date.now() - MAX_AGE_MS;
-
-  // Clean memory
-  for (const [ts, data] of threads) {
-    if ((data.created_at || 0) < cutoff) {
-      threads.delete(ts);
-    }
+  for (const [ts, data] of cache) {
+    if ((data.created_at || 0) < cutoff) cache.delete(ts);
   }
-
-  // Clean disk
-  try {
-    if (fs.existsSync(STORE_DIR)) {
-      const files = fs.readdirSync(STORE_DIR);
-      for (const file of files) {
-        const filePath = path.join(STORE_DIR, file);
-        try {
-          const raw = fs.readFileSync(filePath, 'utf8');
-          const data = JSON.parse(raw);
-          if ((data.created_at || 0) < cutoff) {
-            fs.unlinkSync(filePath);
-          }
-        } catch (e) {
-          // Corrupt file, remove it
-          try { fs.unlinkSync(filePath); } catch (e2) { /* ignore */ }
-        }
-      }
-    }
-  } catch (e) { /* ignore */ }
 }, 60 * 60 * 1000);
-
-// Load existing threads from disk on startup
-try {
-  if (fs.existsSync(STORE_DIR)) {
-    const files = fs.readdirSync(STORE_DIR);
-    let loaded = 0;
-    const cutoff = Date.now() - MAX_AGE_MS;
-    for (const file of files) {
-      try {
-        const filePath = path.join(STORE_DIR, file);
-        const raw = fs.readFileSync(filePath, 'utf8');
-        const data = JSON.parse(raw);
-        if ((data.created_at || 0) >= cutoff) {
-          const threadTs = file.replace('.json', '').replace(/_/g, '.');
-          threads.set(threadTs, data);
-          loaded++;
-        } else {
-          fs.unlinkSync(path.join(STORE_DIR, file));
-        }
-      } catch (e) { /* skip corrupt files */ }
-    }
-    if (loaded > 0) console.log(`[ThreadMemory] Restored ${loaded} thread(s) from disk`);
-  }
-} catch (e) { /* ignore */ }
 
 module.exports = { getThread, setThread, updateThread, addConversation, deleteThread };

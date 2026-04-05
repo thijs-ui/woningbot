@@ -219,7 +219,7 @@ async function getNewResalesForAlert(alert) {
     : new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString();
 
   const params = {
-    select: 'ref,price,currency,property_type,town,province,beds,baths,built_m2,pool,new_build,features,desc_nl,desc_en,images,first_seen_at',
+    select: 'ref,price,currency,property_type,town,province,beds,baths,built_m2,pool,new_build,features,desc_nl,desc_en,images,url,first_seen_at',
     first_seen_at: `gte.${cutoff}`,
     price_freq:    'eq.sale',
     order:         'price.asc',
