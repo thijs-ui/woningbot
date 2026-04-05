@@ -46,6 +46,57 @@ expressApp.get('/health', (req, res) => {
   res.json({ status: 'ok', service: 'woningbot-api' });
 });
 
+// ─── Property Lookup (direct, no AI) ───────────────────────────────────────
+
+expressApp.post('/api/lookup', async (req, res) => {
+  const { url } = req.body;
+  const ts = new Date().toISOString();
+
+  if (!url) return res.status(400).json({ error: 'url is required' });
+
+  console.log(`[${ts}] [API] Lookup: ${url}`);
+
+  try {
+    let prop = null;
+
+    if (url.includes('idealista.com')) {
+      prop = await lookupIdealista(url);
+    } else if (url.includes('costaselect.com')) {
+      prop = await scrapeCostaSelectPage(url);
+    } else {
+      // Try as ref number
+      const refMatch = url.match(/\d{5,8}/);
+      if (refMatch) {
+        prop = await lookupProperty(refMatch[0]);
+      }
+    }
+
+    if (!prop) {
+      return res.status(404).json({ error: 'Property not found' });
+    }
+
+    return res.json({
+      title: prop.title || prop.ref || '',
+      price: prop.price || null,
+      location: prop.location || prop.town || '',
+      bedrooms: prop.bedrooms || prop.beds || null,
+      bathrooms: prop.bathrooms || prop.baths || null,
+      size_m2: prop.size_m2 || prop.built_m2 || null,
+      plot_m2: prop.plot_m2 || null,
+      property_type: prop.property_type || '',
+      description: prop.desc_nl || prop.description || '',
+      features: prop.features || [],
+      url: prop.url || url,
+      thumbnail: prop.thumbnail || (prop.images && prop.images[0]?.url) || null,
+      images: (prop.images || []).map(img => img?.url || img).filter(Boolean).slice(0, 6),
+      source: prop.source || '',
+    });
+  } catch (err) {
+    console.error(`[${ts}] [API] Lookup failed:`, err.message);
+    return res.status(500).json({ error: `Lookup failed: ${err.message}` });
+  }
+});
+
 // ─── Intent Detection ──────────────────────────────────────────────────────
 
 const INTENT_PROMPT = `Je bent een intent classifier voor een vastgoed-chatbot. Classificeer het bericht van de gebruiker.
