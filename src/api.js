@@ -22,6 +22,7 @@ const { lookupProperty, getClientProperties, getAllClients } = require('./servic
 const { scrapeCostaSelectPage } = require('./services/costaselect-scraper');
 const { lookupIdealista } = require('./services/idealista-lookup');
 const { saveAlert, getAlertsForUser, deactivateAlert } = require('./services/alert-service');
+const { QueryLogger } = require('./services/query-logger');
 
 const claude = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 const CLAUDE_MODEL = process.env.CLAUDE_MODEL || 'claude-sonnet-4-20250514';
@@ -146,7 +147,7 @@ async function detectIntent(message) {
 // ─── Main Chat Endpoint ────────────────────────────────────────────────────
 
 expressApp.post('/api/chat', async (req, res) => {
-  const { message, sessionId } = req.body;
+  const { message, sessionId, user_id: userId } = req.body;
   const ts = new Date().toISOString();
 
   if (!message || typeof message !== 'string') {
@@ -155,16 +156,22 @@ expressApp.post('/api/chat', async (req, res) => {
 
   console.log(`[${ts}] [API] Chat: "${message.substring(0, 100)}" (session: ${sessionId || 'new'})`);
 
+  const log = new QueryLogger({ userMessage: message, sessionId, userId, source: 'web' });
+
   try {
     // Detect intent
+    const endIntent = log.startStep('intent_detection');
     const { intent, query } = await detectIntent(message);
+    endIntent({ intent });
+    log.setIntent(intent);
     console.log(`[${ts}] [API] Intent: ${intent}, Query: "${query.substring(0, 80)}"`);
 
     // If we have a session and intent is refinement, refine
     if (sessionId && (intent === 'verfijn' || intent === 'zoekwoning')) {
       const threadData = await getThread(sessionId);
       if (threadData && threadData.all_properties) {
-        const result = await handleRefinement(sessionId, threadData, message);
+        const result = await handleRefinement(sessionId, threadData, message, log);
+        log.finish({ status: 'success' });
         return res.json(result);
       }
     }
@@ -173,10 +180,10 @@ expressApp.post('/api/chat', async (req, res) => {
     let result;
     switch (intent) {
       case 'zoekwoning':
-        result = await handleNewSearch(query);
+        result = await handleNewSearch(query, log);
         break;
       case 'nieuwbouw':
-        result = await handleNieuwbouw(query);
+        result = await handleNieuwbouw(query, log);
         break;
       case 'vergelijk':
         result = await handleVergelijk(query);
@@ -201,10 +208,19 @@ expressApp.post('/api/chat', async (req, res) => {
         break;
     }
 
+    // Bepaal status uit resultaat (handlers kunnen 'response' meegeven met
+    // foutboodschap maar geen properties — dat telt als no_results / parse_error)
+    const isStructuredFail = result && /niet begrijpen|geen woningen vinden|geen daarvan voldoet|mislukt/i.test(result.response || '');
+    const finalStatus = isStructuredFail
+      ? (result.response.match(/niet begrijpen/i) ? 'parse_error' : 'no_results')
+      : 'success';
+    log.finish({ status: finalStatus });
+
     return res.json(result);
 
   } catch (error) {
     console.error(`[${ts}] [API] Error:`, error);
+    log.finish({ status: 'exception', errorMessage: error.message || String(error) });
     return res.status(500).json({
       error: 'Er ging iets mis. Probeer het opnieuw.',
       sessionId: sessionId || null,
@@ -214,14 +230,17 @@ expressApp.post('/api/chat', async (req, res) => {
 
 // ─── Handler: Zoekwoning (existing) ────────────────────────────────────────
 
-async function handleNewSearch(queryText) {
+async function handleNewSearch(queryText, log = null) {
   const ts = new Date().toISOString();
   const sessionId = uuidv4();
 
   let clientProfile;
+  const endParser = log?.startStep('parser');
   try {
     clientProfile = await parseSearchQuery(queryText);
+    endParser?.({ ok: true });
   } catch (err) {
+    endParser?.({ ok: false, error: err.message });
     console.error(`[${ts}] [API] Parse failed:`, err.message);
     return {
       response: 'Ik kon je zoekopdracht niet begrijpen. Probeer het anders te formuleren, bijvoorbeeld:\n\n"Villa in Estepona, budget 500k-800k, 3 slaapkamers, zwembad"',
@@ -235,15 +254,25 @@ async function handleNewSearch(queryText) {
 
   console.log(`[${ts}] [API] Searching for: ${locationStr}`);
 
-  const [idealistaListings, supabaseListings] = await Promise.allSettled([
+  const endIdealista = log?.startScrapeStep('idealista');
+  const endSupabaseSearch = log?.startScrapeStep('supabase');
+  const [idealistaSettled, supabaseSettled] = await Promise.allSettled([
     searchIdealista(hardFilters),
     searchSupabase(hardFilters),
-  ]).then(([idealista, supabase]) => [
-    idealista.status === 'fulfilled' ? idealista.value : [],
-    supabase.status === 'fulfilled' ? supabase.value : [],
   ]);
+  const idealistaListings = idealistaSettled.status === 'fulfilled' ? idealistaSettled.value : [];
+  const supabaseListings = supabaseSettled.status === 'fulfilled' ? supabaseSettled.value : [];
+  endIdealista?.({
+    count: idealistaListings.length,
+    error: idealistaSettled.status === 'rejected' ? String(idealistaSettled.reason?.message || idealistaSettled.reason) : null,
+  });
+  endSupabaseSearch?.({
+    count: supabaseListings.length,
+    error: supabaseSettled.status === 'rejected' ? String(supabaseSettled.reason?.message || supabaseSettled.reason) : null,
+  });
 
   const allRaw = [...idealistaListings, ...supabaseListings];
+  log?.setCounts({ totalFound: allRaw.length });
 
   if (allRaw.length === 0) {
     return {
@@ -252,8 +281,13 @@ async function handleNewSearch(queryText) {
     };
   }
 
+  const endDedup = log?.startStep('dedup');
   const deduplicated = deduplicateListings(allRaw);
+  endDedup?.({ before: allRaw.length, after: deduplicated.length });
+
+  const endFilter = log?.startStep('filter');
   const allProperties = preFilterListings(deduplicated, hardFilters);
+  endFilter?.({ before: deduplicated.length, after: allProperties.length });
 
   if (allProperties.length === 0) {
     return {
@@ -263,14 +297,18 @@ async function handleNewSearch(queryText) {
   }
 
   let selectionResult;
+  const endSelector = log?.startStep('selector');
   try {
     selectionResult = await selectProperties(clientProfile, allProperties);
+    endSelector?.({ ok: true, selected: (selectionResult.selections || []).length });
   } catch (err) {
+    endSelector?.({ ok: false, error: err.message });
     console.error(`[${ts}] [API] Selection failed:`, err.message);
     return { response: 'De AI-selectie is mislukt. Probeer het opnieuw.', sessionId };
   }
 
   const selections = postValidateSelections(selectionResult.selections || [], allProperties, hardFilters);
+  log?.setCounts({ selectedCount: selections.length });
 
   try {
     const selectedProps = selections.map(s =>
@@ -305,42 +343,64 @@ async function handleNewSearch(queryText) {
 
 // ─── Handler: Nieuwbouw ────────────────────────────────────────────────────
 
-async function handleNieuwbouw(queryText) {
+async function handleNieuwbouw(queryText, log = null) {
   const ts = new Date().toISOString();
 
   let clientProfile;
+  const endParser = log?.startStep('parser');
   try {
     clientProfile = await parseSearchQuery(queryText);
+    endParser?.({ ok: true });
   } catch (err) {
+    endParser?.({ ok: false, error: err.message });
     return { response: 'Ik kon je nieuwbouw-zoekopdracht niet begrijpen. Probeer: "nieuwbouw Costa del Sol, 2 slpk, max 300k"' };
   }
 
   const hardFilters = { ...(clientProfile.hard_filters || {}), is_new_build: true };
 
-  const [idealistaListings, supabaseListings] = await Promise.allSettled([
+  const endIdealista = log?.startScrapeStep('idealista');
+  const endSupabaseSearch = log?.startScrapeStep('supabase');
+  const [idealistaSettled, supabaseSettled] = await Promise.allSettled([
     searchIdealista(hardFilters),
     searchSupabase(hardFilters),
-  ]).then(([idealista, supabase]) => [
-    idealista.status === 'fulfilled' ? idealista.value : [],
-    supabase.status === 'fulfilled' ? supabase.value : [],
   ]);
+  const idealistaListings = idealistaSettled.status === 'fulfilled' ? idealistaSettled.value : [];
+  const supabaseListings = supabaseSettled.status === 'fulfilled' ? supabaseSettled.value : [];
+  endIdealista?.({
+    count: idealistaListings.length,
+    error: idealistaSettled.status === 'rejected' ? String(idealistaSettled.reason?.message || idealistaSettled.reason) : null,
+  });
+  endSupabaseSearch?.({
+    count: supabaseListings.length,
+    error: supabaseSettled.status === 'rejected' ? String(supabaseSettled.reason?.message || supabaseSettled.reason) : null,
+  });
 
   const allRaw = [...idealistaListings, ...supabaseListings].filter(p => p.is_new_build !== false);
+  log?.setCounts({ totalFound: allRaw.length });
   if (allRaw.length === 0) {
     return { response: 'Geen nieuwbouwprojecten gevonden voor deze criteria. Probeer een andere locatie of ruimer budget.' };
   }
 
+  const endDedup = log?.startStep('dedup');
   const deduplicated = deduplicateListings(allRaw);
+  endDedup?.({ before: allRaw.length, after: deduplicated.length });
+
+  const endFilter = log?.startStep('filter');
   const allProperties = preFilterListings(deduplicated, hardFilters);
+  endFilter?.({ before: deduplicated.length, after: allProperties.length });
 
   let selectionResult;
+  const endSelector = log?.startStep('selector');
   try {
     selectionResult = await selectProperties(clientProfile, allProperties);
+    endSelector?.({ ok: true, selected: (selectionResult.selections || []).length });
   } catch (err) {
+    endSelector?.({ ok: false, error: err.message });
     return { response: 'De selectie is mislukt. Probeer het opnieuw.' };
   }
 
   const selections = selectionResult.selections || [];
+  log?.setCounts({ selectedCount: selections.length });
   const properties = mapSelections(selections, allProperties);
 
   return {
@@ -710,7 +770,7 @@ Je kunt helpen met:
 
 // ─── Handler: Refinement (existing) ────────────────────────────────────────
 
-async function handleRefinement(sessionId, threadData, feedback) {
+async function handleRefinement(sessionId, threadData, feedback, _log = null) {
   const ts = new Date().toISOString();
   addConversation(sessionId, 'consultant', feedback);
 
