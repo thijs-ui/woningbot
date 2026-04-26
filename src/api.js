@@ -23,6 +23,7 @@ const { scrapeCostaSelectPage } = require('./services/costaselect-scraper');
 const { lookupIdealista } = require('./services/idealista-lookup');
 const { saveAlert, getAlertsForUser, deactivateAlert } = require('./services/alert-service');
 const { QueryLogger } = require('./services/query-logger');
+const { verifyFreshness } = require('./services/freshness');
 
 const claude = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 const CLAUDE_MODEL = process.env.CLAUDE_MODEL || 'claude-sonnet-4-20250514';
@@ -332,12 +333,27 @@ async function handleNewSearch(queryText, log = null) {
     created_at: Date.now(), type: 'api',
   });
 
-  const properties = mapSelections(selections, allProperties);
-  const summary = selectionResult.summary || `${selections.length} woningen gevonden in ${locationStr}`;
+  const mapped = mapSelections(selections, allProperties);
+
+  // Sprint 1: freshness check op Supabase-properties in top-10
+  const endFreshness = log?.startStep('freshness');
+  const freshness = await verifyFreshness(mapped);
+  endFreshness?.({ removed: freshness.removed });
+  const properties = freshness.kept;
+  if (freshness.removed > 0) {
+    log?.setCounts({ selectedCount: properties.length });
+  }
+
+  const summary = selectionResult.summary || `${properties.length} woningen gevonden in ${locationStr}`;
 
   return {
     response: summary, sessionId, properties,
-    stats: { total_found: allRaw.length, after_filter: allProperties.length, selected: selections.length },
+    stats: {
+      total_found: allRaw.length,
+      after_filter: allProperties.length,
+      selected: properties.length,
+      removed_dead: freshness.removed,
+    },
   };
 }
 
@@ -826,7 +842,13 @@ function mapSelections(selections, allProperties) {
       thumbnail: prop?.thumbnail || null,
       source: prop?.source || '',
       motivation: s.motivation || '',
-      score: s.score || null,
+      score: s.match_score ?? s.score ?? null,
+      // Sprint 1: structured selector output
+      reasons_for: Array.isArray(s.reasons_for) ? s.reasons_for : [],
+      reasons_against: Array.isArray(s.reasons_against) ? s.reasons_against : [],
+      highlights: Array.isArray(s.highlights) ? s.highlights : [],
+      // Cross-portal info (was al in dedup, niet eerder doorgegeven)
+      also_on: prop?.also_on || [],
     };
   });
 }

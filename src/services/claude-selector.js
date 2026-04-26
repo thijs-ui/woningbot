@@ -64,7 +64,9 @@ Geef ALLEEN valid JSON terug:
       "property_id": "originele ID uit de listing data",
       "match_score": 0-100,
       "motivation": "2-3 zinnen in het Nederlands waarom deze woning bij de klant past. Wees specifiek: verwijs naar concrete details uit de beschrijving die matchen met de wensen. Vermeld relevante locatie-context. Noem ook eventuele minpunten.",
-      "highlights": ["3-5 korte tags die de match beschrijven"]
+      "highlights": ["3-5 korte tags die de match beschrijven"],
+      "reasons_for": ["3-5 korte zinnen (Nederlands) — wat maakt deze woning sterk voor deze klant"],
+      "reasons_against": ["1-3 korte zinnen (Nederlands) — eventuele zwakke punten, compromissen, of aandachtspunten. Lege array als er niets is."]
     }
   ]
 }

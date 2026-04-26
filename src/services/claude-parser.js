@@ -1,5 +1,6 @@
 const Anthropic = require('@anthropic-ai/sdk');
 const { claudeRetry } = require('./claude-retry');
+const { normalizeQuery } = require('./query-normalizer');
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
@@ -80,23 +81,107 @@ PROJECTNAMEN:
 - Als iets niet afleidbaar is, gebruik null of lege array.`;
 
 /**
+ * Validate the structure of Claude's parsed output.
+ * Returns array of error messages (empty = valid).
+ */
+function validateClientProfile(parsed) {
+  if (!parsed || typeof parsed !== 'object') {
+    return ['Response is geen JSON object'];
+  }
+  if (!parsed.hard_filters || typeof parsed.hard_filters !== 'object') {
+    return ['hard_filters ontbreekt of is geen object'];
+  }
+
+  const hf = parsed.hard_filters;
+  const errors = [];
+
+  if (hf.locations !== undefined && hf.locations !== null && !Array.isArray(hf.locations)) {
+    errors.push('hard_filters.locations moet een array zijn (kan leeg zijn)');
+  }
+  if (hf.neighborhoods !== undefined && hf.neighborhoods !== null && !Array.isArray(hf.neighborhoods)) {
+    errors.push('hard_filters.neighborhoods moet een array zijn (kan leeg zijn)');
+  }
+  for (const key of ['price_min', 'price_max', 'bedrooms_min', 'bedrooms_max', 'bathrooms_min', 'size_min_m2', 'size_max_m2']) {
+    if (hf[key] != null && typeof hf[key] !== 'number') {
+      errors.push(`hard_filters.${key} moet number of null zijn (is nu ${typeof hf[key]})`);
+    }
+  }
+  if (hf.is_new_build !== undefined && hf.is_new_build !== null && typeof hf.is_new_build !== 'boolean') {
+    errors.push('hard_filters.is_new_build moet boolean of null zijn');
+  }
+
+  return errors;
+}
+
+function tryParseJson(text) {
+  const cleaned = text.replace(/^```(?:json)?\n?/, '').replace(/\n?```$/, '').trim();
+  try {
+    return { ok: true, value: JSON.parse(cleaned) };
+  } catch (err) {
+    return { ok: false, error: err.message, raw: cleaned };
+  }
+}
+
+/**
  * Parse a free-text search query into hard filters + soft criteria.
- * Retries once on failure.
+ * Sprint 1 update: normaliseert input deterministisch eerst (€/M/K),
+ * valideert Claude's output tegen schema, en retry'd 1x bij fouten met
+ * expliciete feedback richting Claude.
  */
 async function parseSearchQuery(queryText) {
-  const response = await claudeRetry(client, {
-    model: CLAUDE_MODEL,
-    max_tokens: 800,
-    system: SYSTEM_PROMPT,
-    messages: [{ role: 'user', content: queryText }],
-  }, { label: 'ClaudeParser' });
+  // Pre-process: deterministische normalisatie (€/M/K naar cijfers)
+  const norm = normalizeQuery(queryText);
+  if (norm.changed) {
+    console.log(`[Claude Parser] Normalized: "${queryText}" → "${norm.normalized}"`);
+  }
+  const inputForClaude = norm.normalized;
 
-  const text = response.content[0].text.trim();
-  const cleaned = text.replace(/^```(?:json)?\n?/, '').replace(/\n?```$/, '').trim();
-  const parsed = JSON.parse(cleaned);
+  const conversation = [{ role: 'user', content: inputForClaude }];
+  let lastParseError = null;
+  let lastSchemaErrors = null;
+  let lastResponseText = null;
 
-  // Backwards compatibility: if parser returns "location" (string), convert to "locations" (array)
-  if (parsed.hard_filters) {
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    const response = await claudeRetry(client, {
+      model: CLAUDE_MODEL,
+      max_tokens: 800,
+      system: SYSTEM_PROMPT,
+      messages: conversation,
+    }, { label: `ClaudeParser:attempt${attempt}` });
+
+    lastResponseText = response.content[0].text.trim();
+    const parseResult = tryParseJson(lastResponseText);
+
+    if (!parseResult.ok) {
+      lastParseError = parseResult.error;
+      console.warn(`[Claude Parser] Attempt ${attempt} JSON-parse failed: ${parseResult.error}`);
+      if (attempt < 2) {
+        conversation.push(
+          { role: 'assistant', content: lastResponseText },
+          { role: 'user', content: `Je vorige antwoord was geen geldige JSON (parser-fout: "${parseResult.error}"). Geef ALLEEN een geldig JSON object terug volgens het schema, geen tekst eromheen, geen markdown fences.` }
+        );
+        continue;
+      }
+      throw new Error(`Parser failed: invalid JSON after retry (${lastParseError})`);
+    }
+
+    const parsed = parseResult.value;
+    const schemaErrors = validateClientProfile(parsed);
+
+    if (schemaErrors.length > 0) {
+      lastSchemaErrors = schemaErrors;
+      console.warn(`[Claude Parser] Attempt ${attempt} schema validation failed:`, schemaErrors);
+      if (attempt < 2) {
+        conversation.push(
+          { role: 'assistant', content: lastResponseText },
+          { role: 'user', content: `Je vorige output had deze schema-fouten: ${schemaErrors.join('; ')}. Geef opnieuw een geldige JSON.` }
+        );
+        continue;
+      }
+      throw new Error(`Parser schema-validation failed after retry: ${lastSchemaErrors.join('; ')}`);
+    }
+
+    // Backwards compatibility: if parser returns "location" (string), convert to "locations" (array)
     if (parsed.hard_filters.location && !parsed.hard_filters.locations) {
       const loc = parsed.hard_filters.location;
       parsed.hard_filters.locations = loc.includes(',')
@@ -122,10 +207,13 @@ async function parseSearchQuery(queryText) {
       parsed.hard_filters.locations,
       parsed.hard_filters.neighborhoods
     );
+
+    console.log('[Claude Parser] Parsed:', JSON.stringify(parsed, null, 2));
+    return parsed;
   }
 
-  console.log('[Claude Parser] Parsed:', JSON.stringify(parsed, null, 2));
-  return parsed;
+  // Should be unreachable
+  throw new Error('Parser exhausted attempts');
 }
 
 /**
