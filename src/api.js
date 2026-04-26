@@ -24,9 +24,16 @@ const { lookupIdealista } = require('./services/idealista-lookup');
 const { saveAlert, getAlertsForUser, deactivateAlert } = require('./services/alert-service');
 const { QueryLogger } = require('./services/query-logger');
 const { verifyFreshness } = require('./services/freshness');
+const queryCache = require('./services/query-cache');
 
 const claude = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+// Sprint 2: per-stap modellen. Routing (intent) krijgt Haiku, zware
+// reasoning (selector / vergelijk / pitch / buurt / prijs / algemeen)
+// blijft op Sonnet.
 const CLAUDE_MODEL = process.env.CLAUDE_MODEL || 'claude-sonnet-4-20250514';
+const CLAUDE_MODEL_INTENT = process.env.CLAUDE_MODEL_INTENT
+  || process.env.CLAUDE_MODEL
+  || 'claude-haiku-4-5-20251001';
 
 const expressApp = express();
 expressApp.use(cors());
@@ -132,7 +139,7 @@ Voorbeelden:
 async function detectIntent(message) {
   try {
     const response = await claude.messages.create({
-      model: CLAUDE_MODEL,
+      model: CLAUDE_MODEL_INTENT,
       max_tokens: 150,
       messages: [{ role: 'user', content: `${INTENT_PROMPT}\n\nBericht: "${message}"` }],
     });
@@ -255,16 +262,54 @@ async function handleNewSearch(queryText, log = null) {
 
   console.log(`[${ts}] [API] Searching for: ${locationStr}`);
 
+  // Sprint 2: cache-check vóór scraping
+  const endCache = log?.startStep('cache_lookup');
+  const cached = await queryCache.get(hardFilters);
+  endCache?.({ hit: !!cached });
+  if (cached) {
+    console.log(`[${ts}] [API] Cache HIT — returning cached response`);
+    log?.setCounts({
+      totalFound: cached.stats?.total_found,
+      selectedCount: cached.stats?.selected,
+    });
+    return { ...cached, sessionId, _cached: true };
+  }
+
+  // Sprint 2: probeer warm-cache (prewarm) per stad, scrape Apify alleen
+  // voor steden die niet warm zijn.
+  const warmListings = [];
+  const warmedCities = [];
+  const coldCities = [];
+  for (const city of locations) {
+    const warm = await queryCache.getWarmListings(city);
+    if (warm && Array.isArray(warm) && warm.length > 0) {
+      warmListings.push(...warm);
+      warmedCities.push(city);
+    } else {
+      coldCities.push(city);
+    }
+  }
+  if (warmedCities.length > 0) {
+    console.log(`[${ts}] [API] Warm-cache hit: ${warmedCities.join(', ')} (${warmListings.length} listings)`);
+  }
+
   const endIdealista = log?.startScrapeStep('idealista');
   const endSupabaseSearch = log?.startScrapeStep('supabase');
+  // Apify alleen voor cold cities; supabase-search loopt voor alle locaties
+  const idealistaPromise = coldCities.length > 0
+    ? searchIdealista({ ...hardFilters, locations: coldCities })
+    : Promise.resolve([]);
   const [idealistaSettled, supabaseSettled] = await Promise.allSettled([
-    searchIdealista(hardFilters),
+    idealistaPromise,
     searchSupabase(hardFilters),
   ]);
-  const idealistaListings = idealistaSettled.status === 'fulfilled' ? idealistaSettled.value : [];
+  const liveIdealista = idealistaSettled.status === 'fulfilled' ? idealistaSettled.value : [];
+  const idealistaListings = [...warmListings, ...liveIdealista];
   const supabaseListings = supabaseSettled.status === 'fulfilled' ? supabaseSettled.value : [];
   endIdealista?.({
     count: idealistaListings.length,
+    warm_used: warmedCities.length,
+    apify_used: coldCities.length,
     error: idealistaSettled.status === 'rejected' ? String(idealistaSettled.reason?.message || idealistaSettled.reason) : null,
   });
   endSupabaseSearch?.({
@@ -346,8 +391,8 @@ async function handleNewSearch(queryText, log = null) {
 
   const summary = selectionResult.summary || `${properties.length} woningen gevonden in ${locationStr}`;
 
-  return {
-    response: summary, sessionId, properties,
+  const result = {
+    response: summary, properties,
     stats: {
       total_found: allRaw.length,
       after_filter: allProperties.length,
@@ -355,6 +400,13 @@ async function handleNewSearch(queryText, log = null) {
       removed_dead: freshness.removed,
     },
   };
+
+  // Sprint 2: stop response in cache (zonder sessionId — die is per request uniek)
+  if (properties.length > 0) {
+    void queryCache.set(hardFilters, result);
+  }
+
+  return { ...result, sessionId };
 }
 
 // ─── Handler: Nieuwbouw ────────────────────────────────────────────────────

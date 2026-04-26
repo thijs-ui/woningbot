@@ -4,7 +4,10 @@ const { normalizeQuery } = require('./query-normalizer');
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-const CLAUDE_MODEL = process.env.CLAUDE_MODEL || 'claude-sonnet-4-20250514';
+// Sprint 2: Haiku voor parser (lichte routing-taak), Sonnet via fallback.
+const CLAUDE_MODEL = process.env.CLAUDE_MODEL_PARSER
+  || process.env.CLAUDE_MODEL
+  || 'claude-haiku-4-5-20251001';
 
 const SYSTEM_PROMPT = `Je bent een vastgoed-zoekparser voor Spanje. Je krijgt een zoekopdracht van een makelaar/consultant over wat hun klant zoekt.
 

@@ -27,6 +27,7 @@
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",
     "@slack/bolt": "^4.1.0",
+    "@upstash/redis": "^1.37.0",
     "apify-client": "^2.22.3",
     "cheerio": "^1.2.0",
     "cors": "^2.8.6",

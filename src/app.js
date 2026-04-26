@@ -14,6 +14,7 @@ const { handlePitch } = require('./handlers/pitch');
 const { handleBuurt } = require('./handlers/buurt');
 const { handleKlant, handleRemoveClientProperty } = require('./handlers/klant');
 const { runAlertCheck } = require('./jobs/alert-check');
+const { runPrewarm } = require('./jobs/prewarm');
 const { startApiServer } = require('./api');
 
 const app = new App({
@@ -73,6 +74,14 @@ app.error(async (error) => {
     runAlertCheck(app).catch(err => console.error(`[${ts}] [Cron] Alert check error:`, err));
   });
   console.log('⏰ Alert check scheduled: daily at 07:00 UTC (08:00 CET)');
+
+  // Daily prewarm at 04:00 UTC (05:00 CET / 06:00 CEST) — vóór ochtend-werkverkeer
+  cron.schedule('0 4 * * *', () => {
+    const ts = new Date().toISOString();
+    console.log(`[${ts}] [Cron] Triggering daily prewarm...`);
+    runPrewarm().catch(err => console.error(`[${ts}] [Cron] Prewarm error:`, err));
+  });
+  console.log('⏰ Prewarm scheduled: daily at 04:00 UTC (05:00 CET)');
 
   // Start REST API server alongside Slack bot
   startApiServer();
