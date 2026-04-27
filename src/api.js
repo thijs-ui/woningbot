@@ -312,6 +312,7 @@ expressApp.post('/api/alert/save', async (req, res) => {
   try {
     const alert = await saveAlert({
       slack_user_id: slackUserId,
+      slack_channel_id: slackUserId, // DM via user_id — alert-check.js DM't ook naar slack_user_id
       shortlist_id,
       klant_naam: klant_naam || null,
       query_text,
