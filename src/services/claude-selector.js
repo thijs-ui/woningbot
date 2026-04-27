@@ -17,7 +17,7 @@ Jouw taak: selecteer de woningen die het BEST passen bij deze specifieke klant. 
 - Afwezigheid van dealbreakers
 - Algemene kwaliteit en aantrekkelijkheid van de listing
 - Locatiekwaliteit (zie locatiekennis hieronder)
-- Semantic match (`semantic_match` veld, 0..1, indien aanwezig): dit is een
+- Semantic match (semantic_match veld, 0..1, indien aanwezig): dit is een
   embedding-similarity tussen de zachte criteria van de klant en de listing-tekst.
   Hoge waarde (>0.6) = de beschrijving past goed op de gewenste sfeer/stijl/must-haves.
   Lage waarde (<0.3) op een listing die op andere vlakken sterk lijkt = let op,
