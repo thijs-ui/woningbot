@@ -3,8 +3,16 @@ const { selectProperties } = require('../services/claude-selector');
 const { searchIdealista, enrichListingsWithDetails } = require('../services/idealista-direct');
 // const { searchThinkSpain } = require('../services/thinkspain');  // Temporarily disabled
 const { searchSupabase } = require('../services/supabase-search');
-const { embed: embedQuery, isConfigured: isEmbeddingConfigured } = require('../services/openai-embeddings');
-const { buildSoftQueryInput } = require('../services/embedding-input');
+const {
+  embed: embedQuery,
+  embedBatch: embedListings,
+  cosineSimilarity,
+  isConfigured: isEmbeddingConfigured,
+} = require('../services/openai-embeddings');
+const {
+  buildSoftQueryInput,
+  buildListingPostMappedInput,
+} = require('../services/embedding-input');
 const { expandLocations: expandCityAliases } = require('../services/location-aliases');
 const { analyzeSelectedPhotos } = require('../services/claude-vision');
 const { deduplicateListings } = require('../services/dedup');
@@ -17,6 +25,45 @@ const {
   buildErrorBlocks,
   buildNoResultsBlocks,
 } = require('../formatters/slack-blocks');
+
+/**
+ * Idealista live-resultaten on-the-fly embedden + cosine similarity
+ * berekenen vs query-embedding. Faalt stilletjes — bij error gewoon de
+ * originele listings teruggeven zonder similarity-veld.
+ */
+async function attachIdealistaSimilarity(listings, queryEmbedding) {
+  if (!Array.isArray(listings) || listings.length === 0) return listings;
+  if (!queryEmbedding) return listings;
+
+  // Bouw embedding-input per listing; sla over als input te leeg is
+  const inputs = [];
+  const idxMap = []; // index in originele listings
+  for (let i = 0; i < listings.length; i++) {
+    const text = buildListingPostMappedInput(listings[i]);
+    if (text && text.trim().length > 20) {
+      inputs.push(text);
+      idxMap.push(i);
+    }
+  }
+
+  if (inputs.length === 0) return listings;
+
+  let vectors;
+  try {
+    vectors = await embedListings(inputs);
+  } catch (err) {
+    console.warn(`[ZoekWoning] Idealista similarity-embed faalde: ${err.message}`);
+    return listings;
+  }
+
+  for (let j = 0; j < idxMap.length; j++) {
+    const sim = cosineSimilarity(queryEmbedding, vectors[j]);
+    listings[idxMap[j]].similarity = sim;
+  }
+
+  console.log(`[ZoekWoning] ${idxMap.length} Idealista listings verrijkt met similarity`);
+  return listings;
+}
 
 /**
  * Update the status message in Slack. Silent on failure.
@@ -128,8 +175,14 @@ async function handleZoekwoning({ command, ack, respond, client }) {
       }
     }
 
+    // Idealista wordt na scrape ook geëmbed (zodat selector semantic_match heeft op live results)
+    const idealistaWithSim = (async () => {
+      const listings = await searchIdealista(hardFilters);
+      return queryEmbedding ? attachIdealistaSimilarity(listings, queryEmbedding) : listings;
+    })();
+
     const [idealistaListings, supabaseListings] = await Promise.allSettled([
-      searchIdealista(hardFilters),
+      idealistaWithSim,
       searchSupabase(hardFilters, { queryEmbedding }),
     ]).then(([idealista, supabase]) => {
       const idealistaResult = idealista.status === 'fulfilled' ? idealista.value : [];

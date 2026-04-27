@@ -97,6 +97,47 @@ function buildListingEmbeddingInput(row) {
   return lines.join('\n');
 }
 
+// ─── Post-mapped listing builder (Idealista, etc.) ─────────────────────────
+
+/**
+ * Bouwt embedding-input uit een listing in het interne unified format
+ * (output van Idealista mapper of supabase-search.mapRow). Wordt gebruikt
+ * voor on-the-fly embedding van live-scrape resultaten zodat de selector
+ * ook semantic_match krijgt op niet-DB-rijen.
+ */
+function buildListingPostMappedInput(listing) {
+  if (!listing || typeof listing !== 'object') return null;
+
+  const type = listing.property_type || 'woning';
+  const locatie = joinNonEmpty([
+    listing.municipality || listing.location,
+    listing.district,
+    listing.province,
+  ]);
+
+  const kenmerken = [];
+  if (Array.isArray(listing.features)) {
+    for (const f of listing.features) {
+      if (f && typeof f === 'string') kenmerken.push(f.toLowerCase());
+    }
+  }
+  if (listing.is_new_build) kenmerken.push('nieuwbouw');
+
+  const beschrijving = truncateDescription(listing.description || '');
+  const titel = cleanText(listing.title || '');
+
+  const lines = [
+    `Type: ${type}`,
+    titel ? `Titel: ${titel}` : null,
+    locatie ? `Locatie: ${locatie}` : null,
+    kenmerken.length > 0 ? `Kenmerken: ${joinNonEmpty(kenmerken)}` : null,
+    beschrijving ? `Beschrijving: ${beschrijving}` : null,
+  ].filter(Boolean);
+
+  if (lines.length === 0) return null;
+  return lines.join('\n');
+}
+
 // ─── Soft-criteria query builder ───────────────────────────────────────────
 
 /**
@@ -137,5 +178,6 @@ function buildSoftQueryInput(softCriteria) {
 module.exports = {
   buildResalesEmbeddingInput,
   buildListingEmbeddingInput,
+  buildListingPostMappedInput,
   buildSoftQueryInput,
 };

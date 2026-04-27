@@ -137,9 +137,22 @@ async function embedBatch(texts) {
   return out;
 }
 
+/**
+ * Cosine similarity tussen twee vectoren. OpenAI text-embedding-3-* output
+ * is unit-normalized, dus dot product == cosine similarity. Geen normalisatie
+ * nodig hier — scheelt twee Math.sqrt-calls.
+ */
+function cosineSimilarity(a, b) {
+  if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return 0;
+  let dot = 0;
+  for (let i = 0; i < a.length; i++) dot += a[i] * b[i];
+  return dot;
+}
+
 module.exports = {
   isConfigured,
   embed,
   embedBatch,
+  cosineSimilarity,
   MAX_BATCH_SIZE,
 };
