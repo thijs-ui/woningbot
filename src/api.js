@@ -23,6 +23,17 @@ const { scrapeCostaSelectPage } = require('./services/costaselect-scraper');
 const { lookupIdealista } = require('./services/idealista-lookup');
 const { saveAlert, getAlertsForUser, deactivateAlert } = require('./services/alert-service');
 const { WebClient: SlackWebClient } = require('@slack/web-api');
+const {
+  embed: embedQuery,
+  embedBatch: embedListings,
+  cosineSimilarity,
+  isConfigured: isEmbeddingConfigured,
+} = require('./services/openai-embeddings');
+const {
+  buildSoftQueryInput,
+  buildListingPostMappedInput,
+} = require('./services/embedding-input');
+const { expandLocations: expandCityAliases } = require('./services/location-aliases');
 const { QueryLogger } = require('./services/query-logger');
 const { verifyFreshness } = require('./services/freshness');
 const queryCache = require('./services/query-cache');
@@ -432,6 +443,41 @@ expressApp.delete('/api/alert/:id', async (req, res) => {
 
 // ─── Handler: Zoekwoning (existing) ────────────────────────────────────────
 
+/**
+ * Idealista (en warm-cache) listings on-the-fly embedden + cosine similarity
+ * berekenen vs query-embedding. Faalt stilletjes — bij error gewoon de
+ * originele listings zonder similarity-veld.
+ */
+async function attachIdealistaSimilarity(listings, queryEmbedding) {
+  if (!Array.isArray(listings) || listings.length === 0) return listings;
+  if (!queryEmbedding) return listings;
+
+  const inputs = [];
+  const idxMap = [];
+  for (let i = 0; i < listings.length; i++) {
+    const text = buildListingPostMappedInput(listings[i]);
+    if (text && text.trim().length > 20) {
+      inputs.push(text);
+      idxMap.push(i);
+    }
+  }
+  if (inputs.length === 0) return listings;
+
+  let vectors;
+  try {
+    vectors = await embedListings(inputs);
+  } catch (err) {
+    console.warn(`[API] Idealista similarity-embed faalde: ${err.message}`);
+    return listings;
+  }
+
+  for (let j = 0; j < idxMap.length; j++) {
+    listings[idxMap[j]].similarity = cosineSimilarity(queryEmbedding, vectors[j]);
+  }
+  console.log(`[API] ${idxMap.length} Idealista listings verrijkt met similarity`);
+  return listings;
+}
+
 async function handleNewSearch(queryText, log = null) {
   const ts = new Date().toISOString();
   const sessionId = uuidv4();
@@ -451,14 +497,43 @@ async function handleNewSearch(queryText, log = null) {
   }
 
   const hardFilters = clientProfile.hard_filters || {};
+
+  // Locatie-aliassen (Javea ↔ Xàbia, Alicante ↔ Alacant)
+  if (Array.isArray(hardFilters.locations) && hardFilters.locations.length > 0) {
+    const before = hardFilters.locations;
+    hardFilters.locations = expandCityAliases(before);
+    if (hardFilters.locations.length > before.length) {
+      console.log(`[${ts}] [API] Locaties uitgebreid: ${JSON.stringify(before)} → ${JSON.stringify(hardFilters.locations)}`);
+    }
+  }
+
   const locations = hardFilters.locations || [];
   const locationStr = locations.length > 0 ? locations.join(', ') : 'onbekend';
 
   console.log(`[${ts}] [API] Searching for: ${locationStr}`);
 
+  // Soft-criteria → embedding (fase 5.1). Faalt stilletjes; zonder embedding
+  // valt searchSupabase terug op legacy ranking (prijs ASC).
+  let queryEmbedding = null;
+  const softQueryText = buildSoftQueryInput(clientProfile.soft_criteria);
+  if (softQueryText && isEmbeddingConfigured()) {
+    try {
+      queryEmbedding = await embedQuery(softQueryText);
+      console.log(`[${ts}] [API] Soft query embedded (${queryEmbedding.length}d)`);
+    } catch (embErr) {
+      console.warn(`[${ts}] [API] Embedding failed: ${embErr.message}`);
+    }
+  }
+
+  // Cache-key met soft-criteria zodat verschillende vibey queries niet
+  // dezelfde cached response krijgen
+  const cacheKey = softQueryText
+    ? { ...hardFilters, _soft: softQueryText }
+    : hardFilters;
+
   // Sprint 2: cache-check vóór scraping
   const endCache = log?.startStep('cache_lookup');
-  const cached = await queryCache.get(hardFilters);
+  const cached = await queryCache.get(cacheKey);
   endCache?.({ hit: !!cached });
   if (cached) {
     console.log(`[${ts}] [API] Cache HIT — returning cached response`);
@@ -489,16 +564,21 @@ async function handleNewSearch(queryText, log = null) {
 
   const endIdealista = log?.startScrapeStep('idealista');
   const endSupabaseSearch = log?.startScrapeStep('supabase');
-  // Apify alleen voor cold cities; supabase-search loopt voor alle locaties
-  const idealistaPromise = coldCities.length > 0
-    ? searchIdealista({ ...hardFilters, locations: coldCities })
-    : Promise.resolve([]);
+  // Apify alleen voor cold cities; supabase-search loopt voor alle locaties.
+  // Idealista wordt na scrape on-the-fly geëmbed zodat selector semantic_match
+  // krijgt op live results.
+  const idealistaPromise = (async () => {
+    const live = coldCities.length > 0
+      ? await searchIdealista({ ...hardFilters, locations: coldCities })
+      : [];
+    const merged = [...warmListings, ...live];
+    return queryEmbedding ? attachIdealistaSimilarity(merged, queryEmbedding) : merged;
+  })();
   const [idealistaSettled, supabaseSettled] = await Promise.allSettled([
     idealistaPromise,
-    searchSupabase(hardFilters),
+    searchSupabase(hardFilters, { queryEmbedding }),
   ]);
-  const liveIdealista = idealistaSettled.status === 'fulfilled' ? idealistaSettled.value : [];
-  const idealistaListings = [...warmListings, ...liveIdealista];
+  const idealistaListings = idealistaSettled.status === 'fulfilled' ? idealistaSettled.value : [];
   const supabaseListings = supabaseSettled.status === 'fulfilled' ? supabaseSettled.value : [];
   endIdealista?.({
     count: idealistaListings.length,
@@ -597,7 +677,7 @@ async function handleNewSearch(queryText, log = null) {
 
   // Sprint 2: stop response in cache (zonder sessionId — die is per request uniek)
   if (properties.length > 0) {
-    void queryCache.set(hardFilters, result);
+    void queryCache.set(cacheKey, result);
   }
 
   return { ...result, sessionId };
