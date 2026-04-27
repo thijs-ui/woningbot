@@ -61,6 +61,74 @@ function supabaseRequest(path, params = {}) {
   });
 }
 
+// ─── Hybrid RPC search (Fase 5.1) ──────────────────────────────────────────
+
+/**
+ * Roept de `search_listings_hybrid` RPC aan (zie migrations/002_hybrid_search.sql).
+ * Met `opts.queryEmbedding` rangschikt 'm op zachte-criteria similarity;
+ * zonder embedding gedraagt 'm zich identiek aan de oude search (prijs ASC).
+ */
+async function searchListingsHybrid(filters = {}, opts = {}) {
+  const ts = new Date().toISOString();
+
+  if (!SUPABASE_KEY) {
+    console.error(`[${ts}] [Supabase] SUPABASE_ANON_KEY not set`);
+    return [];
+  }
+
+  const queryEmbedding = opts.queryEmbedding || null;
+  const matchCount = opts.matchCount || (queryEmbedding ? 30 : 500);
+
+  const body = {
+    query_embedding: Array.isArray(queryEmbedding) ? `[${queryEmbedding.join(',')}]` : null,
+    match_count: matchCount,
+    filter_price_min: filters.price_min ?? null,
+    filter_price_max: filters.price_max ?? null,
+    filter_bedrooms_min: filters.bedrooms_min ?? null,
+    filter_bathrooms_min: filters.bathrooms_min ?? null,
+    filter_size_min: filters.size_min_m2 ?? null,
+    filter_locations:
+      Array.isArray(filters.locations) && filters.locations.length > 0
+        ? filters.locations
+        : null,
+    filter_project_name: filters.project_name || null,
+  };
+
+  console.log(
+    `[${ts}] [Supabase] RPC search_listings_hybrid — embedding=${queryEmbedding ? 'yes' : 'no'}, match_count=${matchCount}`
+  );
+
+  try {
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/rpc/search_listings_hybrid`, {
+      method: 'POST',
+      headers: {
+        apikey: SUPABASE_KEY,
+        Authorization: `Bearer ${SUPABASE_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body),
+    });
+
+    if (!res.ok) {
+      const text = await res.text();
+      console.error(`[${ts}] [Supabase] RPC ${res.status}: ${text.slice(0, 200)}`);
+      return [];
+    }
+
+    const rows = await res.json();
+    if (!Array.isArray(rows)) {
+      console.error(`[${ts}] [Supabase] Unexpected RPC response type: ${typeof rows}`);
+      return [];
+    }
+
+    console.log(`[${ts}] [Supabase] RPC returned ${rows.length} listings`);
+    return rows;
+  } catch (err) {
+    console.error(`[${ts}] [Supabase] RPC fetch failed: ${err.message}`);
+    return [];
+  }
+}
+
 // ─── Search listings with filters ──────────────────────────────────────────
 
 /**
@@ -266,11 +334,13 @@ async function findProject(projectName) {
  * @param {Object} filters - Same as searchListings
  * @returns {Object[]} Array of enriched listing objects with .units property
  */
-async function searchListingsWithUnits(filters = {}) {
+async function searchListingsWithUnits(filters = {}, opts = {}) {
   const ts = new Date().toISOString();
 
-  // Step 1: Get matching listings
-  const listings = await searchListings(filters);
+  // Step 1: Get matching listings — hybrid (RPC) als embedding gegeven, anders legacy
+  const listings = opts.queryEmbedding
+    ? await searchListingsHybrid(filters, opts)
+    : await searchListings(filters);
 
   if (listings.length === 0) return [];
 
@@ -416,6 +486,7 @@ function isConfigured() {
 
 module.exports = {
   searchListings,
+  searchListingsHybrid,
   searchListingsWithUnits,
   getUnitsForListings,
   findProject,

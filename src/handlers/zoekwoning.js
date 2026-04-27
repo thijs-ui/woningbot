@@ -3,6 +3,8 @@ const { selectProperties } = require('../services/claude-selector');
 const { searchIdealista, enrichListingsWithDetails } = require('../services/idealista-direct');
 // const { searchThinkSpain } = require('../services/thinkspain');  // Temporarily disabled
 const { searchSupabase } = require('../services/supabase-search');
+const { embed: embedQuery, isConfigured: isEmbeddingConfigured } = require('../services/openai-embeddings');
+const { buildSoftQueryInput } = require('../services/embedding-input');
 const { analyzeSelectedPhotos } = require('../services/claude-vision');
 const { deduplicateListings } = require('../services/dedup');
 const { preFilterListings, postValidateSelections, filterThinkSpainByType } = require('../services/property-filter');
@@ -102,9 +104,22 @@ async function handleZoekwoning({ command, ack, respond, client }) {
 
     const errors = [];
 
+    // Soft-criteria → embedding (Fase 5.1). Faalt stilletjes; zonder embedding
+    // valt searchSupabase terug op legacy ranking (prijs ASC).
+    let queryEmbedding = null;
+    const softQueryText = buildSoftQueryInput(clientProfile.soft_criteria);
+    if (softQueryText && isEmbeddingConfigured()) {
+      try {
+        queryEmbedding = await embedQuery(softQueryText);
+        console.log(`[${ts}] [ZoekWoning] Soft query embedded (${queryEmbedding.length}d)`);
+      } catch (embErr) {
+        console.warn(`[${ts}] [ZoekWoning] Embedding failed: ${embErr.message}`);
+      }
+    }
+
     const [idealistaListings, supabaseListings] = await Promise.allSettled([
       searchIdealista(hardFilters),
-      searchSupabase(hardFilters),
+      searchSupabase(hardFilters, { queryEmbedding }),
     ]).then(([idealista, supabase]) => {
       const idealistaResult = idealista.status === 'fulfilled' ? idealista.value : [];
       const supabaseResult  = supabase.status  === 'fulfilled' ? supabase.value  : [];

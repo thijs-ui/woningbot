@@ -17,6 +17,12 @@ Jouw taak: selecteer de woningen die het BEST passen bij deze specifieke klant. 
 - Afwezigheid van dealbreakers
 - Algemene kwaliteit en aantrekkelijkheid van de listing
 - Locatiekwaliteit (zie locatiekennis hieronder)
+- Semantic match (`semantic_match` veld, 0..1, indien aanwezig): dit is een
+  embedding-similarity tussen de zachte criteria van de klant en de listing-tekst.
+  Hoge waarde (>0.6) = de beschrijving past goed op de gewenste sfeer/stijl/must-haves.
+  Lage waarde (<0.3) op een listing die op andere vlakken sterk lijkt = let op,
+  de tekst dekt de zachte criteria niet expliciet — controleer extra. Niet elke
+  listing heeft dit veld; ontbreken is geen minpunt.
 
 LOCATIEKENNIS SPANJE:
 Gebruik deze context bij het beoordelen van locaties. Vermeld relevante locatie-inzichten in je motivatie.
@@ -103,22 +109,29 @@ function truncateDescription(desc, maxWords = 300) {
  * Prepare properties for Claude (limit tokens).
  */
 function preparePropertiesForClaude(properties) {
-  return properties.map((p, i) => ({
-    id: p.id || p.url || `property_${i}`,
-    title: p.title || 'Onbekend',
-    price: p.price,
-    property_type: p.property_type || null,
-    location: p.location,
-    bedrooms: p.bedrooms,
-    bathrooms: p.bathrooms,
-    size_m2: p.size_m2,
-    description: truncateDescription(p.description),
-    features: p.features || [],
-    url: p.url,
-    portal: p.source || 'idealista',
-    is_new_build: p.is_new_build || false,
-    municipality: p.municipality || '',
-  }));
+  return properties.map((p, i) => {
+    const out = {
+      id: p.id || p.url || `property_${i}`,
+      title: p.title || 'Onbekend',
+      price: p.price,
+      property_type: p.property_type || null,
+      location: p.location,
+      bedrooms: p.bedrooms,
+      bathrooms: p.bathrooms,
+      size_m2: p.size_m2,
+      description: truncateDescription(p.description),
+      features: p.features || [],
+      url: p.url,
+      portal: p.source || 'idealista',
+      is_new_build: p.is_new_build || false,
+      municipality: p.municipality || '',
+    };
+    // Embedding-similarity signaal (Fase 5.1) — alleen meegeven als > 0
+    if (typeof p.similarity === 'number' && p.similarity > 0) {
+      out.semantic_match = Math.round(p.similarity * 100) / 100; // 2 decimalen
+    }
+    return out;
+  });
 }
 
 /**

@@ -1,18 +1,34 @@
 /**
- * supabase-search.js — Zoekt properties in Supabase resales_properties tabel.
+ * supabase-search.js — Zoekt resales in Supabase via de hybrid-search RPC.
  *
- * Filtert op basis van hardFilters (locatie, prijs, kamers, type, etc.)
- * en geeft resultaten terug in hetzelfde formaat als Idealista listings.
+ * Roept `search_resales_hybrid` aan (zie migrations/002_hybrid_search.sql).
+ * Optioneel met een query_embedding voor zachte-criteria ranking; zonder
+ * embedding gedraagt 'm zich identiek aan de oude flow (prijs ASC).
  */
 
 const SUPABASE_URL = (process.env.SUPABASE_URL || '').replace(/\/$/, '');
 const SUPABASE_KEY = process.env.SUPABASE_KEY || process.env.SUPABASE_ANON_KEY || '';
 
+const DEFAULT_MATCH_COUNT_NO_EMBEDDING = 500; // legacy behavior
+const DEFAULT_MATCH_COUNT_WITH_EMBEDDING = 30; // top-N per fase 5 plan
+
 if (!SUPABASE_URL || !SUPABASE_KEY) {
   console.warn('[SupabaseSearch] WARNING: SUPABASE_URL of SUPABASE_KEY niet ingesteld.');
 }
 
-// ─── Feature mapping ───────────────────────────────────────────────────────
+// ─── Property type mapping ─────────────────────────────────────────────────
+
+function mapPropertyType(type) {
+  const t = (type || '').toLowerCase();
+  if (t === 'apartment' || t === 'flat') return 'flat';
+  if (t === 'villa')      return 'chalet';
+  if (t === 'townhouse')  return 'townhouse';
+  if (t === 'penthouse')  return 'penthouse';
+  if (t === 'duplex')     return 'duplex';
+  if (t === 'bungalow')   return 'bungalow';
+  if (t === 'finca' || t === 'country_house') return 'countryHouse';
+  return t || null;
+}
 
 const FEATURE_LABEL_MAP = {
   'sea view': 'sea_view',
@@ -31,21 +47,7 @@ function mapFeatures(featuresArr, pool, newBuild) {
   return features;
 }
 
-// ─── Property type mapping ─────────────────────────────────────────────────
-
-function mapPropertyType(type) {
-  const t = (type || '').toLowerCase();
-  if (t === 'apartment' || t === 'flat') return 'flat';
-  if (t === 'villa')      return 'chalet';
-  if (t === 'townhouse')  return 'townhouse';
-  if (t === 'penthouse')  return 'penthouse';
-  if (t === 'duplex')     return 'duplex';
-  if (t === 'bungalow')   return 'bungalow';
-  if (t === 'finca' || t === 'country_house') return 'countryHouse';
-  return t || null;
-}
-
-// ─── Map Supabase row to internal listing format ───────────────────────────
+// ─── Map RPC row to internal listing format ────────────────────────────────
 
 function mapRow(row) {
   const images = (row.images || []).map(img => img?.url).filter(Boolean);
@@ -83,112 +85,85 @@ function mapRow(row) {
     agency:        null,
     tags:          row.new_build ? ['Obra Nueva'] : [],
     is_new_build:  row.new_build || false,
+    similarity:    typeof row.similarity === 'number' ? row.similarity : null,
   };
 }
 
-// ─── Build Supabase query URL ──────────────────────────────────────────────
+// ─── Vector → pgvector text format ─────────────────────────────────────────
 
-function buildQueryUrl(hardFilters) {
-  const params = new URLSearchParams();
-
-  // Altijd alleen verkoop
-  params.set('price_freq', 'eq.sale');
-
-  // Selecteer alleen benodigde kolommen
-  params.set('select', [
-    'ref', 'url', 'price', 'currency', 'price_freq', 'property_type',
-    'town', 'province', 'latitude', 'longitude',
-    'beds', 'baths', 'pool', 'new_build',
-    'built_m2', 'plot_m2', 'features',
-    'desc_nl', 'desc_en', 'images',
-  ].join(','));
-
-  // Prijsfilters
-  if (hardFilters.price_min) params.set('price', `gte.${hardFilters.price_min}`);
-  if (hardFilters.price_max) {
-    // price kan maar één filter hebben via params, gebruik meerdere keys
-    params.append('price', `lte.${hardFilters.price_max}`);
-  }
-
-  // Kamers
-  if (hardFilters.bedrooms_min) {
-    params.set('beds', `gte.${hardFilters.bedrooms_min}`);
-  }
-
-  // Badkamers
-  if (hardFilters.bathrooms_min) {
-    params.set('baths', `gte.${hardFilters.bathrooms_min}`);
-  }
-
-  // Oppervlakte
-  if (hardFilters.size_min_m2) params.set('built_m2', `gte.${hardFilters.size_min_m2}`);
-
-  // Nieuwbouw
-  if (hardFilters.is_new_build === true) {
-    params.set('new_build', 'eq.true');
-  }
-
-  // Zwembad
-  if (hardFilters.features?.includes('pool')) {
-    params.set('pool', 'eq.true');
-  }
-
-  // Limiet
-  params.set('limit', '500');
-  params.set('order', 'price.asc');
-
-  return `${SUPABASE_URL}/rest/v1/resales_properties?${params.toString()}`;
+function vectorToPgString(vec) {
+  if (!Array.isArray(vec)) return null;
+  return `[${vec.join(',')}]`;
 }
 
-// ─── Locatiefilter (post-filter, meerdere steden) ──────────────────────────
+// ─── Main search ───────────────────────────────────────────────────────────
 
-function matchesLocation(row, locations) {
-  if (!locations || locations.length === 0) return true;
-
-  const town     = (row.town     || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
-  const province = (row.province || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
-
-  return locations.some(loc => {
-    const l = loc.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
-    return town.includes(l) || l.includes(town) || province.includes(l) || l.includes(province);
-  });
-}
-
-// ─── Main search function ──────────────────────────────────────────────────
-
-async function searchSupabase(hardFilters) {
+/**
+ * @param {Object} hardFilters - parser output (price_min/max, bedrooms_min, etc.)
+ * @param {Object} [opts]
+ *   - queryEmbedding: number[1536] | null — vector voor zachte-criteria ranking
+ *   - matchCount: int — aantal rijen (default 30 met embedding, 500 zonder)
+ */
+async function searchSupabase(hardFilters, opts = {}) {
   if (!SUPABASE_URL || !SUPABASE_KEY) {
     console.warn('[SupabaseSearch] Geen Supabase configuratie — zoeken overgeslagen.');
     return [];
   }
 
-  const url = buildQueryUrl(hardFilters);
-  console.log(`[SupabaseSearch] Query: ${url}`);
+  const queryEmbedding = opts.queryEmbedding || null;
+  const matchCount =
+    opts.matchCount ||
+    (queryEmbedding ? DEFAULT_MATCH_COUNT_WITH_EMBEDDING : DEFAULT_MATCH_COUNT_NO_EMBEDDING);
+
+  const body = {
+    query_embedding: vectorToPgString(queryEmbedding),
+    match_count: matchCount,
+    filter_price_min: hardFilters.price_min ?? null,
+    filter_price_max: hardFilters.price_max ?? null,
+    filter_bedrooms_min: hardFilters.bedrooms_min ?? null,
+    filter_bathrooms_min: hardFilters.bathrooms_min ?? null,
+    filter_size_min: hardFilters.size_min_m2 ?? null,
+    filter_property_type: null, // bewust niet gefilterd op DB-niveau (parser-types ≠ DB-types)
+    filter_locations:
+      Array.isArray(hardFilters.locations) && hardFilters.locations.length > 0
+        ? hardFilters.locations
+        : null,
+    filter_pool:
+      Array.isArray(hardFilters.features) && hardFilters.features.includes('pool')
+        ? true
+        : null,
+    filter_new_build:
+      typeof hardFilters.is_new_build === 'boolean' ? hardFilters.is_new_build : null,
+  };
+
+  const url = `${SUPABASE_URL}/rest/v1/rpc/search_resales_hybrid`;
+  console.log(
+    `[SupabaseSearch] RPC search_resales_hybrid — embedding=${queryEmbedding ? 'yes' : 'no'}, match_count=${matchCount}`
+  );
 
   const res = await fetch(url, {
+    method: 'POST',
     headers: {
-      apikey:        SUPABASE_KEY,
+      apikey: SUPABASE_KEY,
       Authorization: `Bearer ${SUPABASE_KEY}`,
+      'Content-Type': 'application/json',
     },
+    body: JSON.stringify(body),
   });
 
   if (!res.ok) {
     const text = await res.text();
-    throw new Error(`Supabase ${res.status}: ${text.slice(0, 200)}`);
+    throw new Error(`Supabase RPC ${res.status}: ${text.slice(0, 200)}`);
   }
 
   const rows = await res.json();
-  console.log(`[SupabaseSearch] ${rows.length} rijen opgehaald uit Supabase`);
+  if (!Array.isArray(rows)) {
+    console.error(`[SupabaseSearch] Onverwacht response-type:`, typeof rows);
+    return [];
+  }
 
-  // Post-filter op locatie (Supabase REST ondersteunt geen OR op meerdere ilike)
-  const locations = hardFilters.locations || [];
-  const filtered = locations.length > 0
-    ? rows.filter(row => matchesLocation(row, locations))
-    : rows;
-
-  console.log(`[SupabaseSearch] ${filtered.length} properties na locatiefilter (${locations.join(', ') || 'alle'})`);
-
-  return filtered.map(mapRow).filter(Boolean);
+  console.log(`[SupabaseSearch] ${rows.length} properties terug uit RPC`);
+  return rows.map(mapRow).filter(Boolean);
 }
 
 module.exports = { searchSupabase };

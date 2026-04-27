@@ -23,6 +23,8 @@ const { searchIdealista } = require('../services/idealista-direct');
 const { deduplicateListings } = require('../services/dedup');
 const { preFilterListings } = require('../services/property-filter');
 const { parseSearchQuery } = require('../services/claude-parser');
+const { embed: embedQuery, isConfigured: isEmbeddingConfigured } = require('../services/openai-embeddings');
+const { buildSoftQueryInput } = require('../services/embedding-input');
 const { setThread, addConversation } = require('../store/thread-memory');
 const supabase = require('../services/supabase');
 const {
@@ -200,7 +202,19 @@ async function handleNieuwbouw({ command, ack, client }) {
         project_name: projectName || null,
       };
 
-      const enrichedListings = await supabase.searchListingsWithUnits(filters);
+      // Soft-criteria → embedding (Fase 5.1). Stille fallback bij errors.
+      let queryEmbedding = null;
+      const softQueryText = buildSoftQueryInput(clientProfile.soft_criteria);
+      if (softQueryText && isEmbeddingConfigured()) {
+        try {
+          queryEmbedding = await embedQuery(softQueryText);
+          console.log(`[${ts}] [Nieuwbouw] Soft query embedded (${queryEmbedding.length}d)`);
+        } catch (embErr) {
+          console.warn(`[${ts}] [Nieuwbouw] Embedding failed: ${embErr.message}`);
+        }
+      }
+
+      const enrichedListings = await supabase.searchListingsWithUnits(filters, { queryEmbedding });
 
       if (enrichedListings.length === 0) {
         await updateStatus(client, channelId, threadTs,
