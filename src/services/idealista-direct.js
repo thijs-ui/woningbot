@@ -433,6 +433,7 @@ function extractFeatures(item) {
  * Returns: Array of listing objects (always an array, even on error).
  */
 async function searchIdealista(hardFilters) {
+  const queryCache = require('./query-cache');
   const locations = hardFilters.locations || (hardFilters.location ? [hardFilters.location] : []);
   const isNewBuild = hardFilters.is_new_build === true;
 
@@ -446,10 +447,21 @@ async function searchIdealista(hardFilters) {
   console.log(`[Idealista] Searching ${searchLocations.length} location(s): ${searchLocations.join(', ')}${isNewBuild ? ' (nieuwbouw)' : ''}`);
 
   const allListings = [];
+  let cacheHits = 0;
+  let apifyCalls = 0;
 
   // Run one actor call per city (igolaizola accepts one location per run)
   for (const city of searchLocations) {
     try {
+      // Cache-check vóór Apify (Sprint 6: per-stad scrape-cache, 1u TTL)
+      const cached = await queryCache.getIdealistaCity(city, hardFilters);
+      if (cached && Array.isArray(cached)) {
+        allListings.push(...cached);
+        cacheHits++;
+        console.log(`[Idealista] ${city}: ${cached.length} listings uit cache (geen Apify-call)`);
+        continue;
+      }
+
       const actorInput = buildActorInput(city, hardFilters, isNewBuild);
 
       // Safety check: if location resolved to null, skip this city
@@ -461,18 +473,24 @@ async function searchIdealista(hardFilters) {
       console.log(`[Idealista] ${city} → Location ID: ${actorInput.location}`);
 
       const items = await callApifyActor(actorInput);
+      apifyCalls++;
 
+      const cityListings = [];
       let mapped = 0;
       let failed = 0;
       for (const item of items) {
         const listing = mapApifyItem(item);
         if (listing) {
-          allListings.push(listing);
+          cityListings.push(listing);
           mapped++;
         } else {
           failed++;
         }
       }
+
+      allListings.push(...cityListings);
+      // Cache deze stad voor volgende queries (1u TTL via query-cache)
+      void queryCache.setIdealistaCity(city, hardFilters, cityListings);
 
       console.log(`[Idealista] ${city}: ${mapped} mapped, ${failed} skipped (${items.length} raw)`);
     } catch (err) {
@@ -489,7 +507,7 @@ async function searchIdealista(hardFilters) {
     }
   }
 
-  console.log(`[Idealista] Total: ${allListings.length} properties from ${searchLocations.length} location(s)`);
+  console.log(`[Idealista] Total: ${allListings.length} properties from ${searchLocations.length} location(s) — cache hits: ${cacheHits}/${searchLocations.length}, Apify calls: ${apifyCalls}`);
   return allListings;
 }
 

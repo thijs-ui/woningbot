@@ -22,8 +22,10 @@ const { createHash } = require('crypto');
 
 const TTL_SECONDS = 6 * 60 * 60; // 6 uur — vastgoed beweegt langzaam
 const WARM_TTL_SECONDS = 24 * 60 * 60; // 24 uur voor prewarm-data
+const IDEALISTA_TTL_SECONDS = 60 * 60; // 1 uur — Idealista per (stad + filters)
 const KEY_PREFIX = 'wb:query:';
 const WARM_PREFIX = 'wb:warm:';
+const IDEALISTA_PREFIX = 'wb:ideal:';
 
 let _redis = null;
 function getRedis() {
@@ -146,6 +148,66 @@ async function setWarmListings(city, listings) {
 }
 
 /**
+ * Per-(stad + filters) Idealista cache. 1 uur TTL.
+ *
+ * Key bevat alleen de filters die het Apify-resultaat beïnvloeden:
+ * price-bucket, bedrooms_min, bathrooms_min, size_min_m2, is_new_build,
+ * property_type, features. Soft-criteria (zacht ranking) zit hier nooit in.
+ */
+function computeIdealistaKey(city, hardFilters) {
+  const f = hardFilters || {};
+  // Round price-buckets to 25k zodat 510k en 525k dezelfde cache-entry delen
+  const priceMinBucket = f.price_min ? Math.floor(f.price_min / 25000) * 25000 : null;
+  const priceMaxBucket = f.price_max ? Math.ceil(f.price_max / 25000) * 25000 : null;
+
+  const subset = {
+    price_min: priceMinBucket,
+    price_max: priceMaxBucket,
+    bedrooms_min: f.bedrooms_min || null,
+    bathrooms_min: f.bathrooms_min || null,
+    size_min_m2: f.size_min_m2 || null,
+    is_new_build: f.is_new_build === true ? true : null,
+    property_type: f.property_type || null,
+    features: Array.isArray(f.features) && f.features.length > 0
+      ? [...f.features].sort()
+      : null,
+  };
+  const json = JSON.stringify(canonicalize(subset));
+  const hash = createHash('sha256').update(json).digest('hex').slice(0, 12);
+  return IDEALISTA_PREFIX + city.toLowerCase() + ':' + hash;
+}
+
+async function getIdealistaCity(city, hardFilters) {
+  const r = getRedis();
+  if (!r || !city) return null;
+  try {
+    const key = computeIdealistaKey(city, hardFilters);
+    const value = await r.get(key);
+    if (value) {
+      console.log(`[QueryCache] Idealista HIT ${key}`);
+      return typeof value === 'string' ? JSON.parse(value) : value;
+    }
+    console.log(`[QueryCache] Idealista MISS ${key}`);
+    return null;
+  } catch (err) {
+    console.warn(`[QueryCache] Idealista get failed for ${city}:`, err.message);
+    return null;
+  }
+}
+
+async function setIdealistaCity(city, hardFilters, listings) {
+  const r = getRedis();
+  if (!r || !city) return;
+  try {
+    const key = computeIdealistaKey(city, hardFilters);
+    await r.set(key, JSON.stringify(listings || []), { ex: IDEALISTA_TTL_SECONDS });
+    console.log(`[QueryCache] Idealista SET ${key} (${listings?.length || 0} listings, TTL ${IDEALISTA_TTL_SECONDS}s)`);
+  } catch (err) {
+    console.warn(`[QueryCache] Idealista set failed for ${city}:`, err.message);
+  }
+}
+
+/**
  * Wis cache (bv. handmatig voor debugging). Niet gebruikt in productie-flow.
  */
 async function flush() {
@@ -162,4 +224,14 @@ async function flush() {
   }
 }
 
-module.exports = { get, set, flush, computeKey, getWarmListings, setWarmListings };
+module.exports = {
+  get,
+  set,
+  flush,
+  computeKey,
+  getWarmListings,
+  setWarmListings,
+  getIdealistaCity,
+  setIdealistaCity,
+  computeIdealistaKey,
+};
