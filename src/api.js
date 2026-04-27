@@ -296,6 +296,35 @@ expressApp.post('/api/alert/save', async (req, res) => {
     });
   }
 
+  // 1b. Duplicate detection — zelfde query_text op zelfde shortlist?
+  try {
+    const sbUrl = (process.env.SUPABASE_URL || '').replace(/\/$/, '');
+    const sbKey = process.env.SUPABASE_ANON_KEY || process.env.SUPABASE_KEY;
+    const normalizedQuery = query_text.trim().toLowerCase();
+    const checkUrl = `${sbUrl}/rest/v1/alerts?select=id,query_text&shortlist_id=eq.${encodeURIComponent(
+      shortlist_id
+    )}&is_active=eq.true`;
+    const dupRes = await fetch(checkUrl, {
+      headers: { apikey: sbKey, Authorization: `Bearer ${sbKey}` },
+    });
+    if (dupRes.ok) {
+      const existing = await dupRes.json();
+      const dup = Array.isArray(existing)
+        ? existing.find(a => (a.query_text || '').trim().toLowerCase() === normalizedQuery)
+        : null;
+      if (dup) {
+        return res.status(409).json({
+          error: 'Er staat al een actieve alert voor deze klant met dezelfde zoekcriteria.',
+          existing_alert_id: dup.id,
+        });
+      }
+    }
+  } catch (err) {
+    // Niet-fataal — als de dedup-check faalt, ga door en laat de DB unique-constraint
+    // (als die er ooit komt) of de gebruiker zelf duplicates oplossen.
+    console.warn(`[${ts}] [Alert] Dedup check faalde (niet-fataal): ${err.message}`);
+  }
+
   // 2. Parse query → hardFilters
   let parsed;
   try {
@@ -334,6 +363,12 @@ expressApp.post('/api/alert/save', async (req, res) => {
     return res.json({ ok: true, alert });
   } catch (err) {
     console.error(`[${ts}] [Alert] Save error:`, err.message);
+    // Detect max-alerts limit (saveAlert throwt met "actieve alerts" in de message)
+    if (err.message && err.message.includes('actieve alerts')) {
+      return res.status(429).json({
+        error: 'Je hebt het maximum aantal actieve alerts bereikt. Deactiveer eerst een bestaande alert om er een nieuwe aan te maken.',
+      });
+    }
     return res.status(500).json({ error: err.message });
   }
 });
