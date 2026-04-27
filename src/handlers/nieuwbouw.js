@@ -69,6 +69,12 @@ const REGION_CITIES = {
     ...(COSTA_SELECT_REGIONS['Costa Blanca South'] || []),
     ...(COSTA_SELECT_REGIONS['Costa Blanca North'] || []),
   ],
+  'costa brava': [
+    'Tossa de Mar', 'Lloret de Mar', 'Blanes', "Platja d'Aro", 'Begur',
+    'Palafrugell', 'Pals', 'Roses', 'Cadaqués', 'Sant Feliu de Guíxols',
+  ],
+  'costa dorada':  ['Sitges', 'Vilanova i la Geltrú', 'Calafell', 'Salou', 'Cambrils', 'La Pineda', 'Tarragona'],
+  'costa daurada': ['Sitges', 'Vilanova i la Geltrú', 'Calafell', 'Salou', 'Cambrils', 'La Pineda', 'Tarragona'],
 };
 
 /**

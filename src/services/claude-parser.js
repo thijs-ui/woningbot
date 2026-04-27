@@ -54,7 +54,10 @@ Regels:
   - "Costa del Sol" → locations: ["Estepona", "Marbella", "Fuengirola", "Mijas", "Benalmádena"]
   - "Costa Blanca South" → locations: ["Torrevieja", "Orihuela", "Guardamar del Segura", "Santa Pola"]
   - "Costa Blanca North" → locations: ["Jávea", "Dénia", "Moraira", "Calpe", "Altea", "Benidorm"]
-- Als een regio wordt genoemd (Costa del Sol, Costa Blanca, etc.), vertaal naar de belangrijkste steden in die regio.
+  - "Costa Brava" → locations: ["Tossa de Mar", "Lloret de Mar", "Blanes", "Platja d'Aro", "Begur", "Palafrugell", "Pals", "Roses", "Cadaqués", "Sant Feliu de Guíxols"]
+  - "Costa Dorada" of "Costa Daurada" → locations: ["Sitges", "Vilanova i la Geltrú", "Calafell", "Salou", "Cambrils", "La Pineda", "Tarragona"]
+- Als een regio wordt genoemd (Costa del Sol, Costa Blanca, Costa Brava, Costa Dorada, etc.), vertaal naar de belangrijkste steden in die regio.
+- Veel Costa Blanca / Costa Brava / Costa Dorada steden hebben TWEE officiële namen (Spaans + Valenciaans/Catalaans). Voorbeelden: Jávea = Xàbia, Alicante = Alacant, Calpe = Calp, Gerona = Girona, Sant Feliu de Guíxols = San Feliu de Guíxols, Platja d'Aro = Playa de Aro. De post-processing voegt automatisch alle varianten toe — jij hoeft maar één naam te outputten.
 
 WIJKEN EN BUURTEN:
 - Als de gebruiker een WIJK of BUURT noemt (bijv. El Cabanyal, El Grau, Ruzafa, El Carmen, Nueva Andalucía, Golden Mile, La Zagaleta, Arenal, Puerto Banús):
