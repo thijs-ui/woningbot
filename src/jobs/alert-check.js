@@ -235,12 +235,14 @@ async function sendNotification(app, alert, units) {
   if (alert.min_rooms) filterParts.push(`${alert.min_rooms}+ slpk`);
   const filterText = filterParts.length > 0 ? filterParts.join(', ') : 'alle criteria';
 
+  const klantPrefix = alert.klant_naam ? `👤 *${alert.klant_naam}* — ` : '';
+
   const blocks = [
     {
       type: 'section',
       text: {
         type: 'mrkdwn',
-        text: `🔔 *${count} nieuwe nieuwbouw listing${count > 1 ? 's' : ''} gevonden*\n_Alert: ${filterText}_`,
+        text: `${klantPrefix}🔔 *${count} nieuwe nieuwbouw listing${count > 1 ? 's' : ''} gevonden*\n_Alert: ${filterText}_`,
       },
     },
     { type: 'divider' },
@@ -323,12 +325,14 @@ async function sendResalesNotification(app, alert, properties) {
   if (alert.min_rooms) filterParts.push(`${alert.min_rooms}+ slpk`);
   const filterText = filterParts.length > 0 ? filterParts.join(', ') : 'alle criteria';
 
+  const klantPrefix = alert.klant_naam ? `👤 *${alert.klant_naam}* — ` : '';
+
   const blocks = [
     {
       type: 'section',
       text: {
         type: 'mrkdwn',
-        text: `🔔 *${count} nieuwe Costa Select listing${count > 1 ? 's' : ''} gevonden*\n_Alert: ${filterText}_`,
+        text: `${klantPrefix}🔔 *${count} nieuwe Costa Select listing${count > 1 ? 's' : ''} gevonden*\n_Alert: ${filterText}_`,
       },
     },
     { type: 'divider' },

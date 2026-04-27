@@ -22,11 +22,22 @@ const { lookupProperty, getClientProperties, getAllClients } = require('./servic
 const { scrapeCostaSelectPage } = require('./services/costaselect-scraper');
 const { lookupIdealista } = require('./services/idealista-lookup');
 const { saveAlert, getAlertsForUser, deactivateAlert } = require('./services/alert-service');
+const { WebClient: SlackWebClient } = require('@slack/web-api');
 const { QueryLogger } = require('./services/query-logger');
 const { verifyFreshness } = require('./services/freshness');
 const queryCache = require('./services/query-cache');
 
 const claude = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+
+// Slack WebClient voor users.lookupByEmail (alert-koppeling vanuit dashboard).
+// Initieer lazy zodat de bot ook draait als SLACK_BOT_TOKEN niet gezet is.
+let _slackClient = null;
+function getSlackClient() {
+  if (!_slackClient && process.env.SLACK_BOT_TOKEN) {
+    _slackClient = new SlackWebClient(process.env.SLACK_BOT_TOKEN);
+  }
+  return _slackClient;
+}
 // Sprint 2: per-stap modellen. Routing (intent) krijgt Haiku, zware
 // reasoning (selector / vergelijk / pitch / buurt / prijs / algemeen)
 // blijft op Sonnet.
@@ -233,6 +244,154 @@ expressApp.post('/api/chat', async (req, res) => {
       error: 'Er ging iets mis. Probeer het opnieuw.',
       sessionId: sessionId || null,
     });
+  }
+});
+
+// ─── Klant-alerts vanuit dashboard ─────────────────────────────────────────
+
+/**
+ * Map dashboard email → Slack user_id via users.lookupByEmail.
+ * Returnt null als email niet bestaat in de Slack workspace.
+ */
+async function lookupSlackUserByEmail(email) {
+  const slack = getSlackClient();
+  if (!slack) throw new Error('SLACK_BOT_TOKEN not configured');
+  try {
+    const result = await slack.users.lookupByEmail({ email });
+    return result.user?.id || null;
+  } catch (err) {
+    if (err.data?.error === 'users_not_found') return null;
+    throw err;
+  }
+}
+
+/**
+ * POST /api/alert/save
+ * Body: { query_text, shortlist_id, klant_naam, user_email, label? }
+ * Maakt een nieuwe alert aan, gekoppeld aan een dashboard-klant (shortlist).
+ * Parsed de query naar hardFilters en saved met klant-context.
+ */
+expressApp.post('/api/alert/save', async (req, res) => {
+  const { query_text, shortlist_id, klant_naam, user_email, label } = req.body;
+  const ts = new Date().toISOString();
+
+  if (!query_text || !user_email || !shortlist_id) {
+    return res.status(400).json({
+      error: 'query_text, user_email en shortlist_id zijn verplicht',
+    });
+  }
+
+  // 1. Email → Slack user_id
+  let slackUserId;
+  try {
+    slackUserId = await lookupSlackUserByEmail(user_email);
+  } catch (err) {
+    console.error(`[${ts}] [Alert] Slack lookup error:`, err.message);
+    return res.status(500).json({ error: `Slack lookup faalde: ${err.message}` });
+  }
+
+  if (!slackUserId) {
+    return res.status(404).json({
+      error: `Email ${user_email} niet gevonden in Slack workspace. Kan alert niet koppelen aan een Slack-account.`,
+    });
+  }
+
+  // 2. Parse query → hardFilters
+  let parsed;
+  try {
+    parsed = await parseSearchQuery(query_text);
+  } catch (err) {
+    console.error(`[${ts}] [Alert] Parse error:`, err.message);
+    return res.status(400).json({ error: `Kon query niet begrijpen: ${err.message}` });
+  }
+
+  const hf = parsed.hard_filters || {};
+  const features = Array.isArray(hf.features) ? hf.features : [];
+
+  // 3. Save alert
+  try {
+    const alert = await saveAlert({
+      slack_user_id: slackUserId,
+      shortlist_id,
+      klant_naam: klant_naam || null,
+      query_text,
+      dashboard_user_email: user_email,
+      label: label || klant_naam || query_text.slice(0, 50),
+      location: Array.isArray(hf.locations) && hf.locations.length > 0 ? hf.locations[0] : null,
+      min_price: hf.price_min || null,
+      max_price: hf.price_max || null,
+      min_rooms: hf.bedrooms_min || null,
+      min_size_m2: hf.size_min_m2 || null,
+      has_pool: features.includes('pool') || null,
+      has_terrace: features.includes('terrace') || null,
+      has_garden: features.includes('garden') || null,
+      is_active: true,
+    });
+
+    console.log(
+      `[${ts}] [Alert] Saved for ${user_email} (Slack ${slackUserId}) — klant "${klant_naam}", shortlist ${shortlist_id}`
+    );
+    return res.json({ ok: true, alert });
+  } catch (err) {
+    console.error(`[${ts}] [Alert] Save error:`, err.message);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * GET /api/alert/by-shortlist?shortlist_id=...
+ * Returnt actieve alerts voor een specifieke klant-shortlist.
+ */
+expressApp.get('/api/alert/by-shortlist', async (req, res) => {
+  const { shortlist_id } = req.query;
+  if (!shortlist_id) {
+    return res.status(400).json({ error: 'shortlist_id is verplicht' });
+  }
+
+  try {
+    const sbUrl = (process.env.SUPABASE_URL || '').replace(/\/$/, '');
+    const sbKey = process.env.SUPABASE_ANON_KEY || process.env.SUPABASE_KEY;
+    const url = `${sbUrl}/rest/v1/alerts?select=*&shortlist_id=eq.${shortlist_id}&is_active=eq.true&order=created_at.desc`;
+    const result = await fetch(url, {
+      headers: { apikey: sbKey, Authorization: `Bearer ${sbKey}` },
+    });
+    if (!result.ok) {
+      return res.status(500).json({ error: `Supabase ${result.status}` });
+    }
+    const rows = await result.json();
+    return res.json(rows);
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * DELETE /api/alert/:id
+ * Body: { user_email } — owner-check via slack_user_id lookup.
+ */
+expressApp.delete('/api/alert/:id', async (req, res) => {
+  const { id } = req.params;
+  const { user_email } = req.body || {};
+
+  if (!user_email) {
+    return res.status(400).json({ error: 'user_email is verplicht voor owner-check' });
+  }
+
+  let slackUserId;
+  try {
+    slackUserId = await lookupSlackUserByEmail(user_email);
+  } catch (err) {
+    return res.status(500).json({ error: `Slack lookup faalde: ${err.message}` });
+  }
+  if (!slackUserId) {
+    return res.status(404).json({ error: `Email ${user_email} niet gevonden in Slack` });
+  }
+
+  try {
+    const result = await deactivateAlert(id, slackUserId);
+    return res.json({ ok: true, deactivated: result });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
   }
 });
 
