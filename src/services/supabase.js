@@ -77,7 +77,7 @@ async function searchListingsHybrid(filters = {}, opts = {}) {
   }
 
   const queryEmbedding = opts.queryEmbedding || null;
-  const matchCount = opts.matchCount || (queryEmbedding ? 30 : 500);
+  const matchCount = opts.matchCount || (queryEmbedding ? 100 : 500);
 
   const body = {
     query_embedding: Array.isArray(queryEmbedding) ? `[${queryEmbedding.join(',')}]` : null,
