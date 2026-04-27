@@ -25,6 +25,7 @@ const { preFilterListings } = require('../services/property-filter');
 const { parseSearchQuery } = require('../services/claude-parser');
 const { embed: embedQuery, isConfigured: isEmbeddingConfigured } = require('../services/openai-embeddings');
 const { buildSoftQueryInput } = require('../services/embedding-input');
+const { expandLocations: expandCityAliases } = require('../services/location-aliases');
 const { setThread, addConversation } = require('../store/thread-memory');
 const supabase = require('../services/supabase');
 const {
@@ -165,13 +166,15 @@ async function handleNieuwbouw({ command, ack, client }) {
       clientProfile.hard_filters.bedrooms_min = null;
     }
 
-    // Expand region names to cities
+    // Expand region names to cities, dan city-aliases (Javea ↔ Xàbia)
     const rawLocations = clientProfile.hard_filters.locations || [];
+    let regionExpanded;
     if (rawLocations.length === 0) {
-      clientProfile.hard_filters.locations = expandLocations(['costa del sol', 'costa blanca south', 'costa blanca north', 'valencia']);
+      regionExpanded = expandLocations(['costa del sol', 'costa blanca south', 'costa blanca north', 'valencia']);
     } else {
-      clientProfile.hard_filters.locations = expandLocations(rawLocations);
+      regionExpanded = expandLocations(rawLocations);
     }
+    clientProfile.hard_filters.locations = expandCityAliases(regionExpanded);
 
     const locations = clientProfile.hard_filters.locations;
     const locationStr = locations.slice(0, 5).join(', ') + (locations.length > 5 ? ` (+${locations.length - 5} meer)` : '');

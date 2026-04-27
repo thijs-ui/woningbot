@@ -5,6 +5,7 @@ const { searchIdealista, enrichListingsWithDetails } = require('../services/idea
 const { searchSupabase } = require('../services/supabase-search');
 const { embed: embedQuery, isConfigured: isEmbeddingConfigured } = require('../services/openai-embeddings');
 const { buildSoftQueryInput } = require('../services/embedding-input');
+const { expandLocations: expandCityAliases } = require('../services/location-aliases');
 const { analyzeSelectedPhotos } = require('../services/claude-vision');
 const { deduplicateListings } = require('../services/dedup');
 const { preFilterListings, postValidateSelections, filterThinkSpainByType } = require('../services/property-filter');
@@ -89,6 +90,16 @@ async function handleZoekwoning({ command, ack, respond, client }) {
     }
 
     const hardFilters = clientProfile.hard_filters || {};
+
+    // Expandeer locaties naar bekende varianten (Javea ↔ Xàbia, Alicante ↔ Alacant)
+    if (Array.isArray(hardFilters.locations) && hardFilters.locations.length > 0) {
+      const before = hardFilters.locations;
+      hardFilters.locations = expandCityAliases(before);
+      if (hardFilters.locations.length > before.length) {
+        console.log(`[${ts}] [ZoekWoning] Locaties uitgebreid: ${JSON.stringify(before)} → ${JSON.stringify(hardFilters.locations)}`);
+      }
+    }
+
     const locations = hardFilters.locations || [];
     const neighborhoods = hardFilters.neighborhoods || [];
     const locationStr = locations.length > 0 ? locations.join(', ') : 'onbekend';
