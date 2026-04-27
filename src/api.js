@@ -272,7 +272,7 @@ async function lookupSlackUserByEmail(email) {
  * Parsed de query naar hardFilters en saved met klant-context.
  */
 expressApp.post('/api/alert/save', async (req, res) => {
-  const { query_text, shortlist_id, klant_naam, user_email, label } = req.body;
+  const { query_text, shortlist_id, klant_naam, user_email } = req.body;
   const ts = new Date().toISOString();
 
   if (!query_text || !user_email || !shortlist_id) {
@@ -316,7 +316,6 @@ expressApp.post('/api/alert/save', async (req, res) => {
       klant_naam: klant_naam || null,
       query_text,
       dashboard_user_email: user_email,
-      label: label || klant_naam || query_text.slice(0, 50),
       location: Array.isArray(hf.locations) && hf.locations.length > 0 ? hf.locations[0] : null,
       min_price: hf.price_min || null,
       max_price: hf.price_max || null,
