@@ -16,7 +16,10 @@ const https = require('https');
 const SUPABASE_URL = (
   process.env.SUPABASE_URL || 'https://sqafsrknbfzhkbxqhqlu.supabase.co'
 ).replace(/\/$/, '');
-const SUPABASE_KEY = process.env.SUPABASE_ANON_KEY || process.env.SUPABASE_KEY || '';
+// Service-role key heeft voorrang: deze service is server-side en moet RLS
+// kunnen bypassen voor reads op listings/units/resales_properties. Anon key
+// als fallback voor lokale dev. Aligned met alert-check.js precedence.
+const SUPABASE_KEY = process.env.SUPABASE_KEY || process.env.SUPABASE_ANON_KEY || '';
 
 // ─── Public API ────────────────────────────────────────────────────────────
 
