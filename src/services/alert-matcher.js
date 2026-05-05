@@ -210,6 +210,9 @@ function sbGet(path, params = {}) {
       if (v !== null && v !== undefined) url.searchParams.set(k, String(v));
     });
 
+    // Debug: log de exacte query (zonder hostname om de log korter te houden).
+    console.log(`[alert-matcher] GET ${url.pathname}${url.search}`);
+
     const options = {
       hostname: url.hostname,
       path: url.pathname + url.search,
@@ -226,7 +229,10 @@ function sbGet(path, params = {}) {
       res.on('data', chunk => data += chunk);
       res.on('end', () => {
         try {
-          resolve({ status: res.statusCode, data: data ? JSON.parse(data) : null });
+          const parsed = data ? JSON.parse(data) : null;
+          const count = Array.isArray(parsed) ? parsed.length : (parsed ? 1 : 0);
+          console.log(`[alert-matcher]   → ${res.statusCode}, ${count} rows`);
+          resolve({ status: res.statusCode, data: parsed });
         } catch (e) {
           reject(new Error(`Supabase parse error: ${e.message}`));
         }
