@@ -116,7 +116,10 @@ async function matchUnits(alert, cutoff) {
     }
     if (ors.length > 0) andClauses.push(`or(${ors.join(',')})`);
   }
-  if (province) {
+  // Province alleen als fallback wanneer geen specifieke stad is gegeven.
+  // Anders is 't redundant met de location-filter en breekt 't bij accent-
+  // mismatch (DB 'Malaga' vs user/parser 'Málaga' — ILIKE is accent-sensitive).
+  if (province && locations.length === 0) {
     const safe = sanitizeIlike(province);
     if (safe) andClauses.push(`province.ilike.%${safe}%`);
   }
@@ -139,7 +142,11 @@ async function matchUnits(alert, cutoff) {
     listingParams.property_type = `in.(${ptSynonyms.join(',')})`;
   }
 
-  // is_new_build true → alleen listings met is_new_development=true.
+  // is_new_build:
+  //   true  → alleen expliciet nieuwbouw (eq.true sluit NULL uit, dat klopt:
+  //           geen marker = niet nieuwbouw)
+  //   false → "niet nieuwbouw": false OF null. Parser default is false ook
+  //           als user 't niet expliciet zegt, dus eq.false zou te streng zijn.
   if (alert.is_new_build === true) {
     listingParams.is_new_development = 'eq.true';
   }
@@ -238,10 +245,22 @@ async function matchResales(alert, cutoff) {
     }
     if (ors.length > 0) andClauses.push(`or(${ors.join(',')})`);
   }
-  if (province) {
+  // Province alleen als fallback wanneer geen specifieke stad is gegeven.
+  if (province && locations.length === 0) {
     const safe = sanitizeIlike(province);
     if (safe) andClauses.push(`province.ilike.%${safe}%`);
   }
+
+  // is_new_build:
+  //   true  → alleen expliciet nieuwbouw (eq.true)
+  //   false → false OF null (de meeste resales hebben new_build=NULL i.p.v.
+  //           expliciet false; parser default is false ook bij geen voorkeur).
+  if (alert.is_new_build === true) {
+    andClauses.push('new_build.eq.true');
+  } else if (alert.is_new_build === false) {
+    andClauses.push('or(new_build.eq.false,new_build.is.null)');
+  }
+
   if (andClauses.length === 1) {
     const clause = andClauses[0];
     if (clause.startsWith('or(')) {
@@ -258,10 +277,6 @@ async function matchResales(alert, cutoff) {
   if (ptSynonyms) {
     params.property_type = `in.(${ptSynonyms.join(',')})`;
   }
-
-  // is_new_build
-  if (alert.is_new_build === true)  params.new_build = 'eq.true';
-  if (alert.is_new_build === false) params.new_build = 'eq.false';
 
   applyRangeFilters(params, [
     ['price',    alert.min_price,    alert.max_price],
