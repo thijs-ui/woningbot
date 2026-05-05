@@ -61,35 +61,30 @@ async function runAlertCheck(app) {
         ? new Date(alert.last_checked_at).toISOString()
         : new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString();
 
-      const [newUnits, newResales] = await Promise.all([
-        findMatches(alert, { cutoff, sources: ['units'], limit: 50 }),
-        findMatches(alert, { cutoff, sources: ['resales'], limit: 50 }),
+      const [newUnits, newCSResales, newIdealistaResales] = await Promise.all([
+        findMatches(alert, { cutoff, sources: ['units'],             limit: 50 }),
+        findMatches(alert, { cutoff, sources: ['resales'],           limit: 50 }),
+        findMatches(alert, { cutoff, sources: ['idealista_resales'], limit: 50 }),
       ]);
 
-      console.log(`[${ts}] [AlertCheck] Alert ${shortId} (${alert.location || 'any'}): ${newUnits.length} nieuwbouw, ${newResales.length} resales`);
+      console.log(`[${ts}] [AlertCheck] Alert ${shortId} (${alert.location || 'any'}): ${newUnits.length} nieuwbouw, ${newCSResales.length} CS-resales, ${newIdealistaResales.length} idealista-resales`);
 
-      if (newUnits.length > 0) {
-        totalMatches += newUnits.length;
+      const dmJobs = [
+        { matches: newUnits,             kind: 'nieuwbouw',        label: 'Nieuwbouw' },
+        { matches: newCSResales,         kind: 'resales',          label: 'Costa Select-resales' },
+        { matches: newIdealistaResales,  kind: 'idealista_resales', label: 'Idealista-resales' },
+      ];
+
+      for (const job of dmJobs) {
+        if (job.matches.length === 0) continue;
+        totalMatches += job.matches.length;
         try {
-          await sendMatchesDM(app, alert, newUnits, 'nieuwbouw');
+          await sendMatchesDM(app, alert, job.matches, job.kind);
           totalNotified++;
-          console.log(`[${ts}] [AlertCheck] Nieuwbouw notificatie verstuurd voor alert ${shortId}`);
+          console.log(`[${ts}] [AlertCheck] ${job.label} notificatie verstuurd voor alert ${shortId}`);
         } catch (dmErr) {
           totalErrors++;
-          console.error(`[${ts}] [AlertCheck] Failed to send DM for alert ${shortId}:`, dmErr.message);
-        }
-        await sleep(DM_DELAY_MS);
-      }
-
-      if (newResales.length > 0) {
-        totalMatches += newResales.length;
-        try {
-          await sendMatchesDM(app, alert, newResales, 'resales');
-          totalNotified++;
-          console.log(`[${ts}] [AlertCheck] Resales notificatie verstuurd voor alert ${shortId}`);
-        } catch (dmErr) {
-          totalErrors++;
-          console.error(`[${ts}] [AlertCheck] Failed to send resales DM for alert ${shortId}:`, dmErr.message);
+          console.error(`[${ts}] [AlertCheck] Failed to send ${job.label} DM for alert ${shortId}:`, dmErr.message);
         }
         await sleep(DM_DELAY_MS);
       }
@@ -243,13 +238,14 @@ async function sendMatchesDM(app, alert, matches, kind) {
   const filterText = filterParts.length > 0 ? filterParts.join(', ') : 'alle criteria';
   const klantPrefix = alert.klant_naam ? `👤 *${alert.klant_naam}* — ` : '';
 
-  const headerLabel = kind === 'nieuwbouw'
-    ? `nieuwbouw listing${count > 1 ? 's' : ''}`
-    : `Costa Select listing${count > 1 ? 's' : ''}`;
+  const headerLabel =
+    kind === 'nieuwbouw'         ? `nieuwbouw listing${count > 1 ? 's' : ''}` :
+    kind === 'idealista_resales' ? `Idealista resale${count > 1 ? 's' : ''}` :
+                                   `Costa Select listing${count > 1 ? 's' : ''}`;
 
-  const moreCommand = kind === 'nieuwbouw'
-    ? `/nieuwbouw ${alert.location || ''}`.trim()
-    : '/zoekwoning';
+  const moreCommand =
+    kind === 'nieuwbouw' ? `/nieuwbouw ${alert.location || ''}`.trim() :
+                           '/zoekwoning';
 
   const blocks = [
     {
@@ -301,18 +297,16 @@ function buildMatchBlock(m) {
   if (m.size_m2) stats.push(`📐 ${m.size_m2}m²`);
   lines.push(stats.join('  '));
 
-  if (m.type === 'unit') {
-    if (m.features.floor) lines.push(`🏢 ${m.features.floor}`);
-    const feats = [];
-    if (m.features.terrace)  feats.push('terras');
-    if (m.features.garden)   feats.push('tuin');
-    if (m.features.pool)     feats.push('zwembad');
-    if (m.features.exterior) feats.push('buitenzijde');
-    if (feats.length > 0) lines.push(feats.join(' · '));
-  } else {
-    if (m.features.pool)        lines.push('🏊 Zwembad');
-    if (m.features.description) lines.push(`_${m.features.description}..._`);
-  }
+  if (m.type === 'unit' && m.features.floor) lines.push(`🏢 ${m.features.floor}`);
+
+  const feats = [];
+  if (m.features.terrace)  feats.push('terras');
+  if (m.features.garden)   feats.push('tuin');
+  if (m.features.pool)     feats.push('zwembad');
+  if (m.features.exterior) feats.push('buitenzijde');
+  if (feats.length > 0) lines.push(feats.join(' · '));
+
+  if (m.features.description) lines.push(`_${m.features.description}..._`);
 
   const block = { type: 'section', text: { type: 'mrkdwn', text: lines.join('\n') } };
   if (m.image) {

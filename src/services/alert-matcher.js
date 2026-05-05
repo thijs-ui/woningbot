@@ -61,21 +61,27 @@ function getPropertyTypeSynonyms(parserType) {
  */
 async function findMatches(alert, opts = {}) {
   const { cutoff = null, limit } = opts;
-  let { sources = ['units', 'resales'] } = opts;
+  let { sources = ['units', 'resales', 'idealista_resales'] } = opts;
 
   // Source-routing op alert-intent:
-  //   - operation=rent → resales (huur), units (nieuwbouw) is altijd sale → skip
-  //   - is_new_build=false → user wil expliciet bestaand → skip units
+  //   - operation=rent → alleen Costa Select-resales kunnen rent zijn
+  //     (units/nieuwbouw + listings hebben geen rent-marker → uitsluiten)
+  //   - is_new_build=false → skip units (per definitie nieuwbouw)
+  //   - is_new_build=true  → skip idealista_resales (per definitie resale)
   if (alert.operation === 'rent') {
-    sources = sources.filter(s => s !== 'units');
+    sources = sources.filter(s => s === 'resales');
   }
   if (alert.is_new_build === false) {
     sources = sources.filter(s => s !== 'units');
   }
+  if (alert.is_new_build === true) {
+    sources = sources.filter(s => s !== 'idealista_resales');
+  }
 
   const tasks = [];
-  if (sources.includes('units'))   tasks.push(matchUnits(alert, cutoff));
-  if (sources.includes('resales')) tasks.push(matchResales(alert, cutoff));
+  if (sources.includes('units'))             tasks.push(matchUnits(alert, cutoff));
+  if (sources.includes('resales'))           tasks.push(matchResales(alert, cutoff));
+  if (sources.includes('idealista_resales')) tasks.push(matchIdealistaResales(alert, cutoff));
 
   const lists = await Promise.all(tasks);
   const merged = lists.flat().sort((a, b) => a.price - b.price);
@@ -295,6 +301,99 @@ async function matchResales(alert, cutoff) {
   return (result.data || []).map(normalizeResale);
 }
 
+// ─── Source: Idealista resales (listings tabel direct) ────────────────────
+// Idealista resales delen de `listings` tabel met nieuwbouw-projects. Het
+// verschil zit in `is_new_development`: true = nieuwbouw (gedekt door
+// matchUnits via units-tabel), false/null = resale. Hier filteren we
+// expliciet op niet-nieuwbouw zodat we geen overlap met matchUnits krijgen.
+
+async function matchIdealistaResales(alert, cutoff) {
+  const locations = effectiveLocations(alert);
+  const neighborhoods = Array.isArray(alert.neighborhoods) ? alert.neighborhoods : [];
+  const province = alert.province || null;
+
+  const params = {
+    select:
+      'id,price,rooms,bathrooms,size_m2,property_type,municipality,district,' +
+      'province,has_swimming_pool,has_terrace,has_garden,has_lift,has_parking,' +
+      'has_air_conditioning,has_storage_room,main_image_url,url,title,' +
+      'first_seen_at,is_new_development',
+    is_active: 'eq.true',
+    order: 'price.asc',
+    limit: '500',
+  };
+  if (cutoff) params.first_seen_at = `gte.${cutoff}`;
+
+  const andClauses = [];
+
+  if (locations.length > 0) {
+    const ors = [];
+    for (const loc of locations) {
+      const safe = sanitizeIlike(loc);
+      if (!safe) continue;
+      ors.push(`municipality.ilike.%${safe}%`);
+      ors.push(`district.ilike.%${safe}%`);
+    }
+    if (ors.length > 0) andClauses.push(`or(${ors.join(',')})`);
+  }
+  if (neighborhoods.length > 0) {
+    const ors = [];
+    for (const nh of neighborhoods) {
+      const safe = sanitizeIlike(nh);
+      if (!safe) continue;
+      ors.push(`district.ilike.%${safe}%`);
+    }
+    if (ors.length > 0) andClauses.push(`or(${ors.join(',')})`);
+  }
+  if (province && locations.length === 0) {
+    const safe = sanitizeIlike(province);
+    if (safe) andClauses.push(`province.ilike.%${safe}%`);
+  }
+
+  // Sluit nieuwbouw uit (zit al in matchUnits via units-tabel).
+  // false OF null — beide zijn 'niet expliciet nieuwbouw'.
+  andClauses.push('or(is_new_development.eq.false,is_new_development.is.null)');
+
+  if (andClauses.length === 1) {
+    const clause = andClauses[0];
+    if (clause.startsWith('or(')) {
+      params.or = `(${clause.slice(3, -1)})`;
+    } else {
+      params.and = `(${clause})`;
+    }
+  } else if (andClauses.length > 1) {
+    params.and = `(${andClauses.join(',')})`;
+  }
+
+  const ptSynonyms = getPropertyTypeSynonyms(alert.property_type);
+  if (ptSynonyms) {
+    params.property_type = `in.(${ptSynonyms.join(',')})`;
+  }
+
+  applyRangeFilters(params, [
+    ['price',   alert.min_price,    alert.max_price],
+    ['rooms',   alert.min_rooms,    alert.max_rooms],
+    ['size_m2', alert.min_size_m2,  alert.max_size_m2],
+  ]);
+
+  if (alert.min_bathrooms) params.bathrooms = `gte.${alert.min_bathrooms}`;
+
+  if (alert.has_pool === true)             params.has_swimming_pool    = 'eq.true';
+  if (alert.has_terrace === true)          params.has_terrace          = 'eq.true';
+  if (alert.has_garden === true)           params.has_garden           = 'eq.true';
+  if (alert.has_garage === true)           params.has_parking          = 'eq.true';
+  if (alert.has_elevator === true)         params.has_lift             = 'eq.true';
+  if (alert.has_air_conditioning === true) params.has_air_conditioning = 'eq.true';
+  if (alert.has_storage === true)          params.has_storage_room     = 'eq.true';
+
+  const result = await sbGet('listings', params);
+  if (result.status >= 400) {
+    console.error(`[alert-matcher] idealista-resales query ${result.status}:`, JSON.stringify(result.data));
+    return [];
+  }
+  return (result.data || []).map(normalizeIdealistaResale);
+}
+
 // ─── Helpers ───────────────────────────────────────────────────────────────
 
 /**
@@ -387,6 +486,28 @@ function normalizeResale(p) {
   };
 }
 
+function normalizeIdealistaResale(l) {
+  return {
+    type: 'idealista_resale',
+    title: l.title || `${l.property_type || 'Property'} in ${l.municipality || l.province || '?'}`,
+    location: [l.municipality, l.district].filter(Boolean).join(', '),
+    price: Number(l.price) || 0,
+    beds: l.rooms || null,
+    size_m2: l.size_m2 || null,
+    url: l.url || null,
+    image: l.main_image_url || null,
+    features: {
+      pool: !!l.has_swimming_pool,
+      terrace: !!l.has_terrace,
+      garden: !!l.has_garden,
+      exterior: false,
+      floor: null,
+      description: null,
+    },
+    raw: l,
+  };
+}
+
 /**
  * Strip karakters die de PostgREST or=(...,...) syntax of ilike-pattern kunnen
  * breken. Spaces blijven (geldig in ilike-patterns); wildcards controleren we
@@ -441,4 +562,5 @@ module.exports = {
   findMatches,
   matchUnits,
   matchResales,
+  matchIdealistaResales,
 };

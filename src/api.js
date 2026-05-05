@@ -382,13 +382,17 @@ async function sendInitialBatchDM(slackUserId, alert, matches) {
   ];
 
   for (const m of matches) {
+    const sourceLabel =
+      m.type === 'unit'              ? '_Nieuwbouw_' :
+      m.type === 'idealista_resale'  ? '_Idealista_' :
+                                       '_Costa Select_';
     const lines = [
       m.url ? `*<${m.url}|${m.title}>*` : `*${m.title}*`,
       m.location ? `📍 ${m.location}` : '',
       `💶 €${m.price.toLocaleString('nl-NL')}` +
         (m.beds ? `  🛏 ${m.beds} slpk` : '') +
         (m.size_m2 ? `  📐 ${m.size_m2}m²` : ''),
-      m.type === 'unit' ? '_Nieuwbouw_' : '_Resale_',
+      sourceLabel,
     ].filter(Boolean);
 
     const block = { type: 'section', text: { type: 'mrkdwn', text: lines.join('\n') } };
