@@ -55,10 +55,13 @@ async function matchUnits(alert, cutoff) {
     const loc = sanitizeIlike(alert.location);
     const result = await sbGet('listings', {
       select: 'id',
-      or: `(municipality.ilike.*${loc}*,district.ilike.*${loc}*)`,
+      or: `(municipality.ilike.%${loc}%,district.ilike.%${loc}%)`,
       limit: '1000',
     });
-    if (result.status >= 400) return [];
+    if (result.status >= 400) {
+      console.error(`[alert-matcher] listings query ${result.status}:`, JSON.stringify(result.data));
+      return [];
+    }
     listingIds = (result.data || []).map(r => r.id);
     if (listingIds.length === 0) return [];
   }
@@ -88,7 +91,10 @@ async function matchUnits(alert, cutoff) {
   if (alert.has_garden === true)  params.has_garden  = 'eq.true';
 
   const result = await sbGet('units', params);
-  if (result.status >= 400) return [];
+  if (result.status >= 400) {
+    console.error(`[alert-matcher] units query ${result.status}:`, JSON.stringify(result.data));
+    return [];
+  }
 
   let units = (result.data || []).filter(u => u.listing);
   // has_pool zit alleen op listings-niveau, niet op units. Post-filter blijft
@@ -114,7 +120,7 @@ async function matchResales(alert, cutoff) {
 
   if (alert.location) {
     const loc = sanitizeIlike(alert.location);
-    params.or = `(town.ilike.*${loc}*,province.ilike.*${loc}*)`;
+    params.or = `(town.ilike.%${loc}%,province.ilike.%${loc}%)`;
   }
 
   if (alert.min_price && alert.max_price) {
@@ -130,7 +136,10 @@ async function matchResales(alert, cutoff) {
   if (alert.has_pool === true) params.pool     = 'eq.true';
 
   const result = await sbGet('resales_properties', params);
-  if (result.status >= 400) return [];
+  if (result.status >= 400) {
+    console.error(`[alert-matcher] resales query ${result.status}:`, JSON.stringify(result.data));
+    return [];
+  }
   return (result.data || []).map(normalizeResale);
 }
 
@@ -186,11 +195,12 @@ function normalizeResale(p) {
 // ─── Helpers ───────────────────────────────────────────────────────────────
 
 /**
- * Strip karakters die de PostgREST or=(...,...) syntax kunnen breken.
- * Spaces blijven (geldig in ilike-patterns).
+ * Strip karakters die de PostgREST or=(...,...) syntax of ilike-pattern kunnen
+ * breken. Spaces blijven (geldig in ilike-patterns); wildcards controleren we
+ * zelf via de %-wrapping eromheen.
  */
 function sanitizeIlike(s) {
-  return String(s).replace(/[(),*]/g, '').trim();
+  return String(s).replace(/[(),*%]/g, '').trim();
 }
 
 function sbGet(path, params = {}) {
