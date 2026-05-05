@@ -153,18 +153,21 @@ async function updateLastChecked(alertId) {
  * Find new units that match an alert's criteria.
  * Checks units added since the alert was last checked.
  */
-async function getNewUnitsForAlert(alert) {
-  // Default cutoff: 25 hours ago (slightly more than daily to avoid gaps)
-  const cutoff = alert.last_checked_at
-    ? new Date(alert.last_checked_at).toISOString()
-    : new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString();
+async function getNewUnitsForAlert(alert, opts = {}) {
+  // Default cutoff: 25 hours ago (slightly more than daily to avoid gaps).
+  // skipCutoff=true → initial-batch mode: alle bestaande matches, geen tijdsfilter.
+  const cutoff = opts.skipCutoff
+    ? null
+    : (alert.last_checked_at
+        ? new Date(alert.last_checked_at).toISOString()
+        : new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString());
 
   const params = {
     select: '*,listing:listings(id,title,url,municipality,district,has_swimming_pool,has_terrace,has_garden,main_image_url)',
-    first_seen_at: `gte.${cutoff}`,
     order: 'price.asc',
-    limit: '50',
+    limit: String(opts.limit || 50),
   };
+  if (cutoff) params.first_seen_at = `gte.${cutoff}`;
 
   // Price filters
   if (alert.min_price && alert.max_price) {
@@ -213,18 +216,20 @@ async function getNewUnitsForAlert(alert) {
  * Find new resales properties that match an alert's criteria.
  * Checks resales_properties added since the alert was last checked.
  */
-async function getNewResalesForAlert(alert) {
-  const cutoff = alert.last_checked_at
-    ? new Date(alert.last_checked_at).toISOString()
-    : new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString();
+async function getNewResalesForAlert(alert, opts = {}) {
+  const cutoff = opts.skipCutoff
+    ? null
+    : (alert.last_checked_at
+        ? new Date(alert.last_checked_at).toISOString()
+        : new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString());
 
   const params = {
     select: 'ref,price,currency,property_type,town,province,beds,baths,built_m2,pool,new_build,features,desc_nl,desc_en,images,url,first_seen_at',
-    first_seen_at: `gte.${cutoff}`,
     price_freq:    'eq.sale',
     order:         'price.asc',
-    limit:         '50',
+    limit:         String(opts.limit || 50),
   };
+  if (cutoff) params.first_seen_at = `gte.${cutoff}`;
 
   if (alert.min_price) params['price'] = `gte.${alert.min_price}`;
   if (alert.max_price) params['price'] = `lte.${alert.max_price}`;
@@ -250,6 +255,47 @@ async function getNewResalesForAlert(alert) {
   return properties;
 }
 
+/**
+ * Initial-batch: huidige matches voor een net-aangemaakte alert.
+ * Zonder first_seen_at-cutoff zodat bestaande inventory ook meekomt.
+ * Returnt een gecombineerde, gesorteerde lijst (units + resales) met max `limit`.
+ */
+async function getInitialMatchesForAlert(alert, limit = 10) {
+  const [units, resales] = await Promise.all([
+    getNewUnitsForAlert(alert, { skipCutoff: true, limit: 50 }),
+    getNewResalesForAlert(alert, { skipCutoff: true, limit: 50 }),
+  ]);
+
+  // Normaliseer naar één gemeenschappelijk shape voor de DM-builder.
+  const normalized = [
+    ...units.map(u => ({
+      type: 'unit',
+      title: u.listing?.title || 'Nieuwbouwproject',
+      location: [u.listing?.municipality, u.listing?.district].filter(Boolean).join(', '),
+      price: Number(u.price) || 0,
+      beds: u.rooms || null,
+      size_m2: u.size_m2 || null,
+      url: u.listing?.url || null,
+      image: u.listing?.main_image_url || null,
+      raw: u,
+    })),
+    ...resales.map(p => ({
+      type: 'resale',
+      title: `${p.property_type || 'Property'} in ${p.town || p.province || '?'}`,
+      location: [p.town, p.province].filter(Boolean).join(', '),
+      price: Number(p.price) || 0,
+      beds: p.beds || null,
+      size_m2: p.built_m2 || null,
+      url: p.url || null,
+      image: (p.images || []).map(i => i?.url).find(Boolean) || null,
+      raw: p,
+    })),
+  ];
+
+  normalized.sort((a, b) => a.price - b.price);
+  return normalized.slice(0, limit);
+}
+
 module.exports = {
   saveAlert,
   getActiveAlerts,
@@ -258,5 +304,6 @@ module.exports = {
   updateLastChecked,
   getNewUnitsForAlert,
   getNewResalesForAlert,
+  getInitialMatchesForAlert,
   MAX_ALERTS_PER_USER,
 };

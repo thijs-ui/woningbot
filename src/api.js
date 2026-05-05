@@ -21,7 +21,13 @@ const { getPricesForLocation, getPriceHistory, comparePrices, formatPriceDataFor
 const { lookupProperty, getClientProperties, getAllClients } = require('./services/client-service');
 const { scrapeCostaSelectPage } = require('./services/costaselect-scraper');
 const { lookupIdealista } = require('./services/idealista-lookup');
-const { saveAlert, getAlertsForUser, deactivateAlert } = require('./services/alert-service');
+const {
+  saveAlert,
+  getAlertsForUser,
+  deactivateAlert,
+  getInitialMatchesForAlert,
+  updateLastChecked,
+} = require('./services/alert-service');
 const { WebClient: SlackWebClient } = require('@slack/web-api');
 const {
   embed: embedQuery,
@@ -277,6 +283,89 @@ async function lookupSlackUserByEmail(email) {
 }
 
 /**
+ * Stuur een test-batch DM met de huidige matches voor een net-aangemaakte alert.
+ * Eenmalig direct na save zodat de gebruiker direct verifieert dat de alert werkt.
+ * Daarna draait de daily cron normaal (delta-only via last_checked_at).
+ */
+async function sendInitialBatchDM(slackUserId, alert, matches) {
+  const slack = getSlackClient();
+  if (!slack) throw new Error('SLACK_BOT_TOKEN not configured');
+
+  const filterParts = [];
+  if (alert.location) filterParts.push(alert.location);
+  if (alert.max_price) filterParts.push(`max €${Number(alert.max_price).toLocaleString('nl-NL')}`);
+  if (alert.min_rooms) filterParts.push(`${alert.min_rooms}+ slpk`);
+  const filterText = filterParts.length > 0 ? filterParts.join(', ') : 'alle criteria';
+  const klantPrefix = alert.klant_naam ? `👤 *${alert.klant_naam}* — ` : '';
+
+  if (matches.length === 0) {
+    await slack.chat.postMessage({
+      channel: slackUserId,
+      text: `${klantPrefix.replace(/\*/g, '')}✨ Alert geactiveerd — momenteel 0 matches (${filterText})`,
+      blocks: [
+        {
+          type: 'section',
+          text: {
+            type: 'mrkdwn',
+            text:
+              `${klantPrefix}✨ *Alert geactiveerd*\n` +
+              `_Filter: ${filterText}_\n\n` +
+              `Momenteel zijn er 0 woningen die aan deze criteria voldoen. ` +
+              `Je krijgt automatisch een melding zodra er een nieuwe match binnenkomt.`,
+          },
+        },
+      ],
+    });
+    return;
+  }
+
+  const blocks = [
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text:
+          `${klantPrefix}✨ *Alert geactiveerd — ${matches.length} huidige match${matches.length > 1 ? 'es' : ''}*\n` +
+          `_Filter: ${filterText}_\n` +
+          `_Eenmalige test-batch. Daarna ontvang je alleen nieuwe woningen._`,
+      },
+    },
+    { type: 'divider' },
+  ];
+
+  for (const m of matches) {
+    const lines = [
+      m.url ? `*<${m.url}|${m.title}>*` : `*${m.title}*`,
+      m.location ? `📍 ${m.location}` : '',
+      `💶 €${m.price.toLocaleString('nl-NL')}` +
+        (m.beds ? `  🛏 ${m.beds} slpk` : '') +
+        (m.size_m2 ? `  📐 ${m.size_m2}m²` : ''),
+      m.type === 'unit' ? '_Nieuwbouw_' : '_Resale_',
+    ].filter(Boolean);
+
+    const block = { type: 'section', text: { type: 'mrkdwn', text: lines.join('\n') } };
+    if (m.image) {
+      block.accessory = { type: 'image', image_url: m.image, alt_text: m.title };
+    }
+    blocks.push(block);
+  }
+
+  blocks.push({
+    type: 'context',
+    elements: [{
+      type: 'mrkdwn',
+      text: `_Alert ID: \`${alert.id.slice(0, 8)}\` · Stop met \`/alert stop ${alert.id.slice(0, 8)}\`_`,
+    }],
+  });
+
+  await slack.chat.postMessage({
+    channel: slackUserId,
+    blocks,
+    text: `✨ Alert geactiveerd — ${matches.length} huidige match${matches.length > 1 ? 'es' : ''} (${filterText})`,
+  });
+}
+
+/**
  * POST /api/alert/save
  * Body: { query_text, shortlist_id, klant_naam, user_email, label? }
  * Maakt een nieuwe alert aan, gekoppeld aan een dashboard-klant (shortlist).
@@ -371,6 +460,21 @@ expressApp.post('/api/alert/save', async (req, res) => {
     console.log(
       `[${ts}] [Alert] Saved for ${user_email} (Slack ${slackUserId}) — klant "${klant_naam}", shortlist ${shortlist_id}`
     );
+
+    // 4. Initial-batch DM (test-modus): top 10 huidige matches versturen,
+    // daarna last_checked_at=NOW zodat de daily cron alleen nieuwe listings ziet.
+    // Faalt non-fataal: alert blijft staan ook als de DM struikelt.
+    try {
+      const matches = await getInitialMatchesForAlert(alert, 10);
+      await sendInitialBatchDM(slackUserId, alert, matches);
+      await updateLastChecked(alert.id);
+      console.log(
+        `[${ts}] [Alert] Initial-batch DM verstuurd voor ${alert.id.slice(0, 8)}: ${matches.length} matches`
+      );
+    } catch (dmErr) {
+      console.error(`[${ts}] [Alert] Initial-batch DM faalde (niet-fataal):`, dmErr.message);
+    }
+
     return res.json({ ok: true, alert });
   } catch (err) {
     console.error(`[${ts}] [Alert] Save error:`, err.message);
