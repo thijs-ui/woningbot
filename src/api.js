@@ -25,9 +25,9 @@ const {
   saveAlert,
   getAlertsForUser,
   deactivateAlert,
-  getInitialMatchesForAlert,
   updateLastChecked,
 } = require('./services/alert-service');
+const { findMatches } = require('./services/alert-matcher');
 const { WebClient: SlackWebClient } = require('@slack/web-api');
 const {
   embed: embedQuery,
@@ -465,7 +465,7 @@ expressApp.post('/api/alert/save', async (req, res) => {
     // daarna last_checked_at=NOW zodat de daily cron alleen nieuwe listings ziet.
     // Faalt non-fataal: alert blijft staan ook als de DM struikelt.
     try {
-      const matches = await getInitialMatchesForAlert(alert, 10);
+      const matches = await findMatches(alert, { cutoff: null, limit: 10 });
       await sendInitialBatchDM(slackUserId, alert, matches);
       await updateLastChecked(alert.id);
       console.log(

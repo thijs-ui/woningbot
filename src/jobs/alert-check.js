@@ -2,7 +2,8 @@
 // Runs daily to check all active alerts for new matching units
 // Sends DM notifications to users when matches are found
 
-const { getActiveAlerts, getNewUnitsForAlert, getNewResalesForAlert, updateLastChecked } = require('../services/alert-service');
+const { getActiveAlerts, updateLastChecked } = require('../services/alert-service');
+const { findMatches } = require('../services/alert-matcher');
 const { getShortlistForPriceCheck, updateLastKnownPrice } = require('../services/client-service');
 
 const SUPABASE_URL = (process.env.SUPABASE_URL || '').replace(/\/$/, '');
@@ -54,9 +55,15 @@ async function runAlertCheck(app) {
     const shortId = alert.id.slice(0, 8);
 
     try {
+      // Cutoff: 25u terug bij nieuwe alerts (ruim de cron-window), anders de
+      // last_checked_at zodat we precies de nieuwe items sinds de vorige run zien.
+      const cutoff = alert.last_checked_at
+        ? new Date(alert.last_checked_at).toISOString()
+        : new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString();
+
       const [newUnits, newResales] = await Promise.all([
-        getNewUnitsForAlert(alert),
-        getNewResalesForAlert(alert),
+        findMatches(alert, { cutoff, sources: ['units'], limit: 50 }),
+        findMatches(alert, { cutoff, sources: ['resales'], limit: 50 }),
       ]);
 
       console.log(`[${ts}] [AlertCheck] Alert ${shortId} (${alert.location || 'any'}): ${newUnits.length} nieuwbouw, ${newResales.length} resales`);
@@ -64,7 +71,7 @@ async function runAlertCheck(app) {
       if (newUnits.length > 0) {
         totalMatches += newUnits.length;
         try {
-          await sendNotification(app, alert, newUnits);
+          await sendMatchesDM(app, alert, newUnits, 'nieuwbouw');
           totalNotified++;
           console.log(`[${ts}] [AlertCheck] Nieuwbouw notificatie verstuurd voor alert ${shortId}`);
         } catch (dmErr) {
@@ -77,7 +84,7 @@ async function runAlertCheck(app) {
       if (newResales.length > 0) {
         totalMatches += newResales.length;
         try {
-          await sendResalesNotification(app, alert, newResales);
+          await sendMatchesDM(app, alert, newResales, 'resales');
           totalNotified++;
           console.log(`[${ts}] [AlertCheck] Resales notificatie verstuurd voor alert ${shortId}`);
         } catch (dmErr) {
@@ -222,158 +229,46 @@ async function sendPriceDropNotification(app, userId, drops) {
 }
 
 /**
- * Send a DM notification to the user about new matching units.
+ * Stuur een DM met matches. Source-agnostic: consumeert de normalized shape uit
+ * alert-matcher.findMatches. `kind` bepaalt alleen header-tekst en de "meer"-link.
  */
-async function sendNotification(app, alert, units) {
-  const count = units.length;
-  const preview = units.slice(0, 5);
+async function sendMatchesDM(app, alert, matches, kind) {
+  const count = matches.length;
+  const preview = matches.slice(0, 5);
 
-  // Build alert summary for context
   const filterParts = [];
-  if (alert.location) filterParts.push(alert.location);
+  if (alert.location)  filterParts.push(alert.location);
   if (alert.max_price) filterParts.push(`max €${Number(alert.max_price).toLocaleString('nl-NL')}`);
   if (alert.min_rooms) filterParts.push(`${alert.min_rooms}+ slpk`);
   const filterText = filterParts.length > 0 ? filterParts.join(', ') : 'alle criteria';
-
   const klantPrefix = alert.klant_naam ? `👤 *${alert.klant_naam}* — ` : '';
+
+  const headerLabel = kind === 'nieuwbouw'
+    ? `nieuwbouw listing${count > 1 ? 's' : ''}`
+    : `Costa Select listing${count > 1 ? 's' : ''}`;
+
+  const moreCommand = kind === 'nieuwbouw'
+    ? `/nieuwbouw ${alert.location || ''}`.trim()
+    : '/zoekwoning';
 
   const blocks = [
     {
       type: 'section',
       text: {
         type: 'mrkdwn',
-        text: `${klantPrefix}🔔 *${count} nieuwe nieuwbouw listing${count > 1 ? 's' : ''} gevonden*\n_Alert: ${filterText}_`,
+        text: `${klantPrefix}🔔 *${count} nieuwe ${headerLabel} gevonden*\n_Alert: ${filterText}_`,
       },
     },
     { type: 'divider' },
+    ...preview.map(buildMatchBlock),
   ];
-
-  for (const unit of preview) {
-    const listing = unit.listing || {};
-    const features = [];
-    if (unit.has_terrace || listing.has_terrace) features.push('terras');
-    if (unit.has_garden  || listing.has_garden)  features.push('tuin');
-    if (listing.has_swimming_pool)               features.push('zwembad');
-    if (unit.is_exterior)                        features.push('buitenzijde');
-
-    const location = [listing.municipality, listing.district].filter(Boolean).join(', ');
-
-    const textLines = [
-      `*${listing.title || 'Nieuwbouwproject'}*`,
-      location ? `📍 ${location}` : '',
-      `💶 €${Number(unit.price || 0).toLocaleString('nl-NL')}  🛏 ${unit.rooms || '?'} slpk  📐 ${unit.size_m2 || '?'}m²`,
-      unit.floor ? `🏢 ${unit.floor}` : '',
-      features.length > 0 ? features.join(' · ') : '',
-      listing.url ? `<${listing.url}|Bekijk project →>` : '',
-    ].filter(Boolean);
-
-    const sectionBlock = {
-      type: 'section',
-      text: {
-        type: 'mrkdwn',
-        text: textLines.join('\n'),
-      },
-    };
-
-    // Add thumbnail if available
-    if (listing.main_image_url) {
-      sectionBlock.accessory = {
-        type: 'image',
-        image_url: listing.main_image_url,
-        alt_text: listing.title || 'Project',
-      };
-    }
-
-    blocks.push(sectionBlock);
-  }
 
   if (count > 5) {
     blocks.push({
       type: 'context',
       elements: [{
         type: 'mrkdwn',
-        text: `_... en nog ${count - 5} meer. Gebruik \`/nieuwbouw ${alert.location || ''}\` voor een volledig overzicht._`,
-      }],
-    });
-  }
-
-  blocks.push({
-    type: 'context',
-    elements: [{
-      type: 'mrkdwn',
-      text: `_Alert ID: \`${alert.id.slice(0, 8)}\` · Stop met \`/alert stop ${alert.id.slice(0, 8)}\`_`,
-    }],
-  });
-
-  await app.client.chat.postMessage({
-    channel: alert.slack_user_id, // DM to user
-    blocks,
-    text: `🔔 ${count} nieuwe listing${count > 1 ? 's' : ''} matchen met jouw alert (${filterText})`,
-  });
-}
-
-/**
- * Send a DM notification for new Costa Select resales properties.
- */
-async function sendResalesNotification(app, alert, properties) {
-  const count = properties.length;
-  const preview = properties.slice(0, 5);
-
-  const filterParts = [];
-  if (alert.location) filterParts.push(alert.location);
-  if (alert.max_price) filterParts.push(`max €${Number(alert.max_price).toLocaleString('nl-NL')}`);
-  if (alert.min_rooms) filterParts.push(`${alert.min_rooms}+ slpk`);
-  const filterText = filterParts.length > 0 ? filterParts.join(', ') : 'alle criteria';
-
-  const klantPrefix = alert.klant_naam ? `👤 *${alert.klant_naam}* — ` : '';
-
-  const blocks = [
-    {
-      type: 'section',
-      text: {
-        type: 'mrkdwn',
-        text: `${klantPrefix}🔔 *${count} nieuwe Costa Select listing${count > 1 ? 's' : ''} gevonden*\n_Alert: ${filterText}_`,
-      },
-    },
-    { type: 'divider' },
-  ];
-
-  for (const p of preview) {
-    const images = (p.images || []).map(img => img?.url).filter(Boolean);
-    const thumbnail = images[0] || null;
-    const desc = (p.desc_nl || p.desc_en || '').substring(0, 120);
-
-    const title = `${p.property_type || 'Property'} in ${p.town || p.province || '?'}`;
-    const textLines = [
-      p.url ? `*<${p.url}|${title}>*` : `*${title}*`,
-      `📍 ${[p.town, p.province].filter(Boolean).join(', ')}`,
-      `💶 €${Number(p.price || 0).toLocaleString('nl-NL')}  🛏 ${p.beds || '?'} slpk  📐 ${p.built_m2 || '?'}m²`,
-      p.pool ? '🏊 Zwembad' : '',
-      desc ? `_${desc}..._` : '',
-    ].filter(Boolean);
-
-    const sectionBlock = {
-      type: 'section',
-      text: { type: 'mrkdwn', text: textLines.join('\n') },
-    };
-
-    if (thumbnail) {
-      sectionBlock.accessory = {
-        type: 'image',
-        image_url: thumbnail,
-        alt_text: `${p.property_type || 'Property'} in ${p.town || '?'}`,
-      };
-    }
-
-    blocks.push(sectionBlock);
-  }
-
-  if (count > 5) {
-    blocks.push({
-      type: 'context',
-      elements: [{
-        type: 'mrkdwn',
-        text: `_... en nog ${count - 5} meer. Gebruik \`/zoekwoning\` voor een volledig overzicht._`,
+        text: `_... en nog ${count - 5} meer. Gebruik \`${moreCommand}\` voor een volledig overzicht._`,
       }],
     });
   }
@@ -389,8 +284,41 @@ async function sendResalesNotification(app, alert, properties) {
   await app.client.chat.postMessage({
     channel: alert.slack_user_id,
     blocks,
-    text: `🔔 ${count} nieuwe Costa Select listing${count > 1 ? 's' : ''} matchen met jouw alert (${filterText})`,
+    text: `🔔 ${count} nieuwe ${headerLabel} matchen met jouw alert (${filterText})`,
   });
+}
+
+/**
+ * Bouwt één Slack section block voor een normalized match.
+ */
+function buildMatchBlock(m) {
+  const titleLine = m.url ? `*<${m.url}|${m.title}>*` : `*${m.title}*`;
+  const lines = [titleLine];
+  if (m.location) lines.push(`📍 ${m.location}`);
+
+  const stats = [`💶 €${m.price.toLocaleString('nl-NL')}`];
+  if (m.beds)    stats.push(`🛏 ${m.beds} slpk`);
+  if (m.size_m2) stats.push(`📐 ${m.size_m2}m²`);
+  lines.push(stats.join('  '));
+
+  if (m.type === 'unit') {
+    if (m.features.floor) lines.push(`🏢 ${m.features.floor}`);
+    const feats = [];
+    if (m.features.terrace)  feats.push('terras');
+    if (m.features.garden)   feats.push('tuin');
+    if (m.features.pool)     feats.push('zwembad');
+    if (m.features.exterior) feats.push('buitenzijde');
+    if (feats.length > 0) lines.push(feats.join(' · '));
+  } else {
+    if (m.features.pool)        lines.push('🏊 Zwembad');
+    if (m.features.description) lines.push(`_${m.features.description}..._`);
+  }
+
+  const block = { type: 'section', text: { type: 'mrkdwn', text: lines.join('\n') } };
+  if (m.image) {
+    block.accessory = { type: 'image', image_url: m.image, alt_text: m.title };
+  }
+  return block;
 }
 
 module.exports = { runAlertCheck };

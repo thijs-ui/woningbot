@@ -1,5 +1,6 @@
 // ─── Alert Service ─────────────────────────────────────────────────────────
-// CRUD operations for alerts stored in Supabase + matching logic for new units
+// CRUD operations voor alerts in Supabase. Matching-logica leeft in
+// src/services/alert-matcher.js (findMatches).
 
 const https = require('https');
 
@@ -24,11 +25,6 @@ function sbRequest(method, path, body = null, params = {}) {
       'Content-Type': 'application/json',
       Prefer: 'return=representation',
     };
-
-    // For PATCH with path filters, add merge-duplicates
-    if (method === 'PATCH') {
-      headers.Prefer = 'return=representation';
-    }
 
     if (bodyStr) {
       headers['Content-Length'] = Buffer.byteLength(bodyStr);
@@ -61,13 +57,9 @@ function sbRequest(method, path, body = null, params = {}) {
 
 // ─── CRUD Operations ───────────────────────────────────────────────────────
 
-/**
- * Save a new alert. Checks max alerts per user first.
- */
 async function saveAlert(alert) {
   const ts = new Date().toISOString();
 
-  // Check alert limit per user
   const existing = await getAlertsForUser(alert.slack_user_id);
   if (existing.length >= MAX_ALERTS_PER_USER) {
     throw new Error(`Je hebt al ${MAX_ALERTS_PER_USER} actieve alerts. Verwijder er eerst een met \`/alert stop <id>\`.`);
@@ -82,9 +74,6 @@ async function saveAlert(alert) {
   return Array.isArray(result.data) ? result.data[0] : result.data;
 }
 
-/**
- * Get all active alerts (for the cron job).
- */
 async function getActiveAlerts() {
   const result = await sbRequest('GET', 'alerts', null, {
     select: '*',
@@ -94,9 +83,6 @@ async function getActiveAlerts() {
   return result.data || [];
 }
 
-/**
- * Get all active alerts for a specific user.
- */
 async function getAlertsForUser(slackUserId) {
   const result = await sbRequest('GET', 'alerts', null, {
     select: '*',
@@ -114,7 +100,6 @@ async function getAlertsForUser(slackUserId) {
 async function deactivateAlert(alertId, slackUserId) {
   const ts = new Date().toISOString();
 
-  // If partial ID (< 36 chars), look up the full ID first
   let fullId = alertId;
   if (alertId.length < 36) {
     const userAlerts = await getAlertsForUser(slackUserId);
@@ -137,163 +122,11 @@ async function deactivateAlert(alertId, slackUserId) {
   return result.data;
 }
 
-/**
- * Update last_checked_at timestamp after processing an alert.
- */
 async function updateLastChecked(alertId) {
   await sbRequest('PATCH', `alerts?id=eq.${alertId}`, {
     last_checked_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
   });
-}
-
-// ─── Matching Logic ────────────────────────────────────────────────────────
-
-/**
- * Find new units that match an alert's criteria.
- * Checks units added since the alert was last checked.
- */
-async function getNewUnitsForAlert(alert, opts = {}) {
-  // Default cutoff: 25 hours ago (slightly more than daily to avoid gaps).
-  // skipCutoff=true → initial-batch mode: alle bestaande matches, geen tijdsfilter.
-  const cutoff = opts.skipCutoff
-    ? null
-    : (alert.last_checked_at
-        ? new Date(alert.last_checked_at).toISOString()
-        : new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString());
-
-  const params = {
-    select: '*,listing:listings(id,title,url,municipality,district,has_swimming_pool,has_terrace,has_garden,main_image_url)',
-    order: 'price.asc',
-    limit: String(opts.limit || 50),
-  };
-  if (cutoff) params.first_seen_at = `gte.${cutoff}`;
-
-  // Price filters
-  if (alert.min_price && alert.max_price) {
-    params['and'] = `(price.gte.${alert.min_price},price.lte.${alert.max_price})`;
-  } else if (alert.min_price) {
-    params['price'] = `gte.${alert.min_price}`;
-  } else if (alert.max_price) {
-    params['price'] = `lte.${alert.max_price}`;
-  }
-
-  // Room and size filters (applied at DB level)
-  if (alert.min_rooms)   params['rooms']   = `gte.${alert.min_rooms}`;
-  if (alert.min_size_m2) params['size_m2'] = `gte.${alert.min_size_m2}`;
-
-  // Terrace and garden can be filtered at DB level on units table
-  if (alert.has_terrace === true) params['has_terrace'] = 'eq.true';
-  if (alert.has_garden  === true) params['has_garden']  = 'eq.true';
-
-  const result = await sbRequest('GET', 'units', null, params);
-  if (result.status >= 400) return [];
-
-  let units = result.data || [];
-
-  // Post-filter: location and listing-level features (not in units table)
-  units = units.filter(u => {
-    if (!u.listing) return false;
-
-    // Location filter: check municipality and district
-    if (alert.location) {
-      const loc = alert.location.toLowerCase();
-      const muni = (u.listing.municipality || '').toLowerCase();
-      const dist = (u.listing.district || '').toLowerCase();
-      if (!muni.includes(loc) && !dist.includes(loc) && !loc.includes(muni)) return false;
-    }
-
-    // Pool filter (only on listing level)
-    if (alert.has_pool === true && !u.listing.has_swimming_pool) return false;
-
-    return true;
-  });
-
-  return units;
-}
-
-/**
- * Find new resales properties that match an alert's criteria.
- * Checks resales_properties added since the alert was last checked.
- */
-async function getNewResalesForAlert(alert, opts = {}) {
-  const cutoff = opts.skipCutoff
-    ? null
-    : (alert.last_checked_at
-        ? new Date(alert.last_checked_at).toISOString()
-        : new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString());
-
-  const params = {
-    select: 'ref,price,currency,property_type,town,province,beds,baths,built_m2,pool,new_build,features,desc_nl,desc_en,images,url,first_seen_at',
-    price_freq:    'eq.sale',
-    order:         'price.asc',
-    limit:         String(opts.limit || 50),
-  };
-  if (cutoff) params.first_seen_at = `gte.${cutoff}`;
-
-  if (alert.min_price) params['price'] = `gte.${alert.min_price}`;
-  if (alert.max_price) params['price'] = `lte.${alert.max_price}`;
-  if (alert.min_rooms) params['beds']  = `gte.${alert.min_rooms}`;
-  if (alert.min_size_m2) params['built_m2'] = `gte.${alert.min_size_m2}`;
-  if (alert.has_pool === true) params['pool'] = 'eq.true';
-
-  const result = await sbRequest('GET', 'resales_properties', null, params);
-  if (result.status >= 400) return [];
-
-  let properties = result.data || [];
-
-  // Post-filter op locatie
-  if (alert.location) {
-    const loc = alert.location.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
-    properties = properties.filter(p => {
-      const town     = (p.town     || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
-      const province = (p.province || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
-      return town.includes(loc) || loc.includes(town) || province.includes(loc);
-    });
-  }
-
-  return properties;
-}
-
-/**
- * Initial-batch: huidige matches voor een net-aangemaakte alert.
- * Zonder first_seen_at-cutoff zodat bestaande inventory ook meekomt.
- * Returnt een gecombineerde, gesorteerde lijst (units + resales) met max `limit`.
- */
-async function getInitialMatchesForAlert(alert, limit = 10) {
-  const [units, resales] = await Promise.all([
-    getNewUnitsForAlert(alert, { skipCutoff: true, limit: 50 }),
-    getNewResalesForAlert(alert, { skipCutoff: true, limit: 50 }),
-  ]);
-
-  // Normaliseer naar één gemeenschappelijk shape voor de DM-builder.
-  const normalized = [
-    ...units.map(u => ({
-      type: 'unit',
-      title: u.listing?.title || 'Nieuwbouwproject',
-      location: [u.listing?.municipality, u.listing?.district].filter(Boolean).join(', '),
-      price: Number(u.price) || 0,
-      beds: u.rooms || null,
-      size_m2: u.size_m2 || null,
-      url: u.listing?.url || null,
-      image: u.listing?.main_image_url || null,
-      raw: u,
-    })),
-    ...resales.map(p => ({
-      type: 'resale',
-      title: `${p.property_type || 'Property'} in ${p.town || p.province || '?'}`,
-      location: [p.town, p.province].filter(Boolean).join(', '),
-      price: Number(p.price) || 0,
-      beds: p.beds || null,
-      size_m2: p.built_m2 || null,
-      url: p.url || null,
-      image: (p.images || []).map(i => i?.url).find(Boolean) || null,
-      raw: p,
-    })),
-  ];
-
-  normalized.sort((a, b) => a.price - b.price);
-  return normalized.slice(0, limit);
 }
 
 module.exports = {
@@ -302,8 +135,5 @@ module.exports = {
   getAlertsForUser,
   deactivateAlert,
   updateLastChecked,
-  getNewUnitsForAlert,
-  getNewResalesForAlert,
-  getInitialMatchesForAlert,
   MAX_ALERTS_PER_USER,
 };
