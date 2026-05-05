@@ -23,7 +23,11 @@ alter table alerts
   add column if not exists has_garage           boolean,
   add column if not exists has_elevator         boolean,
   add column if not exists has_air_conditioning boolean,
-  add column if not exists has_storage          boolean;
+  add column if not exists has_storage          boolean,
+  -- Idealista live-search dedup: lijst van Idealista propertyCodes die
+  -- we al ge-DM'd hebben. Cron vergelijkt huidige Apify-respons hiermee
+  -- en alert alleen op niet-eerder-geziene codes.
+  add column if not exists idealista_seen_codes text[];
 
 -- Bestaande single-location alerts: kopieer naar de array zodat de matcher
 -- consistent locations[] kan lezen. De oude `location` kolom blijft staan

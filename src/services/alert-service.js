@@ -129,11 +129,23 @@ async function updateLastChecked(alertId) {
   });
 }
 
+/**
+ * Persisteer welke Idealista propertyCodes we al ge-DM'd hebben voor deze alert.
+ * Cron vergelijkt huidige Apify-respons hiermee om alleen nieuwe te alerten.
+ */
+async function updateIdealistaSeenCodes(alertId, codes) {
+  await sbRequest('PATCH', `alerts?id=eq.${alertId}`, {
+    idealista_seen_codes: Array.from(new Set(codes || [])),
+    updated_at: new Date().toISOString(),
+  });
+}
+
 module.exports = {
   saveAlert,
   getActiveAlerts,
   getAlertsForUser,
   deactivateAlert,
   updateLastChecked,
+  updateIdealistaSeenCodes,
   MAX_ALERTS_PER_USER,
 };

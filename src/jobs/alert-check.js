@@ -2,7 +2,7 @@
 // Runs daily to check all active alerts for new matching units
 // Sends DM notifications to users when matches are found
 
-const { getActiveAlerts, updateLastChecked } = require('../services/alert-service');
+const { getActiveAlerts, updateLastChecked, updateIdealistaSeenCodes } = require('../services/alert-service');
 const { findMatches } = require('../services/alert-matcher');
 const { getShortlistForPriceCheck, updateLastKnownPrice } = require('../services/client-service');
 
@@ -61,18 +61,23 @@ async function runAlertCheck(app) {
         ? new Date(alert.last_checked_at).toISOString()
         : new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString();
 
-      const [newUnits, newCSResales, newIdealistaResales] = await Promise.all([
+      const [newUnits, newCSResales, allIdealistaResales] = await Promise.all([
         findMatches(alert, { cutoff, sources: ['units'],             limit: 50 }),
         findMatches(alert, { cutoff, sources: ['resales'],           limit: 50 }),
-        findMatches(alert, { cutoff, sources: ['idealista_resales'], limit: 50 }),
+        findMatches(alert, {         sources: ['idealista_resales'] }), // live; geen cutoff
       ]);
 
-      console.log(`[${ts}] [AlertCheck] Alert ${shortId} (${alert.location || 'any'}): ${newUnits.length} nieuwbouw, ${newCSResales.length} CS-resales, ${newIdealistaResales.length} idealista-resales`);
+      // Idealista-dedup tegen seen-codes uit de alerts-rij. Alleen propertyCodes
+      // die we nog NIET ge-DM'd hebben voor deze alert tellen als "nieuw".
+      const seen = new Set(alert.idealista_seen_codes || []);
+      const newIdealistaResales = allIdealistaResales.filter(m => m.code && !seen.has(m.code));
+
+      console.log(`[${ts}] [AlertCheck] Alert ${shortId} (${alert.location || 'any'}): ${newUnits.length} nieuwbouw, ${newCSResales.length} CS-resales, ${newIdealistaResales.length}/${allIdealistaResales.length} idealista-resales (nieuw/totaal)`);
 
       const dmJobs = [
-        { matches: newUnits,             kind: 'nieuwbouw',        label: 'Nieuwbouw' },
-        { matches: newCSResales,         kind: 'resales',          label: 'Costa Select-resales' },
-        { matches: newIdealistaResales,  kind: 'idealista_resales', label: 'Idealista-resales' },
+        { matches: newUnits,            kind: 'nieuwbouw',         label: 'Nieuwbouw' },
+        { matches: newCSResales,        kind: 'resales',           label: 'Costa Select-resales' },
+        { matches: newIdealistaResales, kind: 'idealista_resales', label: 'Idealista-resales' },
       ];
 
       for (const job of dmJobs) {
@@ -87,6 +92,17 @@ async function runAlertCheck(app) {
           console.error(`[${ts}] [AlertCheck] Failed to send ${job.label} DM for alert ${shortId}:`, dmErr.message);
         }
         await sleep(DM_DELAY_MS);
+      }
+
+      // Update seen-codes met de huidige Apify-respons (niet alleen new ones).
+      // Zo blijven listings die nog op Idealista staan in de "seen"-set zitten,
+      // en pas zodra ze van Idealista afvallen kunnen ze later opnieuw triggeren.
+      if (allIdealistaResales.length > 0) {
+        try {
+          await updateIdealistaSeenCodes(alert.id, allIdealistaResales.map(m => m.code).filter(Boolean));
+        } catch (err) {
+          console.error(`[${ts}] [AlertCheck] seen-codes update faalde voor ${shortId}:`, err.message);
+        }
       }
 
       // Always update last_checked_at, even if no matches

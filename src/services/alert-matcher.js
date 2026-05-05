@@ -301,97 +301,73 @@ async function matchResales(alert, cutoff) {
   return (result.data || []).map(normalizeResale);
 }
 
-// ─── Source: Idealista resales (listings tabel direct) ────────────────────
-// Idealista resales delen de `listings` tabel met nieuwbouw-projects. Het
-// verschil zit in `is_new_development`: true = nieuwbouw (gedekt door
-// matchUnits via units-tabel), false/null = resale. Hier filteren we
-// expliciet op niet-nieuwbouw zodat we geen overlap met matchUnits krijgen.
+// ─── Source: Idealista resales (live Apify per alert) ─────────────────────
+// De bot's eigen scraper haalt alleen nieuwbouw binnen (listnewhomes endpoint).
+// Voor resales doen we per alert een live Apify-call met `propertyType: 'homes'`
+// in elke alert-locatie. Apify-resultaten zijn niet in de DB; dedup tegen
+// eerder ge-alerted listings gebeurt via alerts.idealista_seen_codes (een
+// TEXT[] kolom met Idealista propertyCodes die de cron up-to-date houdt).
+//
+// Cutoff (first_seen_at-filter) wordt hier niet gebruikt — Apify returnt
+// huidige aanbod, en de "nieuw"-filter zit in de seen-codes dedup in de caller.
 
-async function matchIdealistaResales(alert, cutoff) {
+async function matchIdealistaResales(alert /* cutoff niet gebruikt */) {
   const locations = effectiveLocations(alert);
-  const neighborhoods = Array.isArray(alert.neighborhoods) ? alert.neighborhoods : [];
-  const province = alert.province || null;
+  if (locations.length === 0) return [];
 
-  const params = {
-    select:
-      'id,price,rooms,bathrooms,size_m2,property_type,municipality,district,' +
-      'province,has_swimming_pool,has_terrace,has_garden,has_lift,has_parking,' +
-      'has_air_conditioning,has_storage_room,main_image_url,url,title,' +
-      'first_seen_at,is_new_development',
-    is_active: 'eq.true',
-    order: 'price.asc',
-    limit: '500',
-  };
-  if (cutoff) params.first_seen_at = `gte.${cutoff}`;
+  // Source-routing: rent + nieuwbouw zitten niet in deze bron.
+  if (alert.operation === 'rent') return [];
+  if (alert.is_new_build === true) return [];
 
-  const andClauses = [];
+  const { searchIdealista } = require('./idealista-direct');
+  const hardFilters = alertToHardFilters(alert);
 
-  if (locations.length > 0) {
-    const ors = [];
-    for (const loc of locations) {
-      const safe = sanitizeIlike(loc);
-      if (!safe) continue;
-      ors.push(`municipality.ilike.%${safe}%`);
-      ors.push(`district.ilike.%${safe}%`);
-    }
-    if (ors.length > 0) andClauses.push(`or(${ors.join(',')})`);
-  }
-  if (neighborhoods.length > 0) {
-    const ors = [];
-    for (const nh of neighborhoods) {
-      const safe = sanitizeIlike(nh);
-      if (!safe) continue;
-      ors.push(`district.ilike.%${safe}%`);
-    }
-    if (ors.length > 0) andClauses.push(`or(${ors.join(',')})`);
-  }
-  if (province && locations.length === 0) {
-    const safe = sanitizeIlike(province);
-    if (safe) andClauses.push(`province.ilike.%${safe}%`);
-  }
-
-  // Sluit nieuwbouw uit (zit al in matchUnits via units-tabel).
-  // false OF null — beide zijn 'niet expliciet nieuwbouw'.
-  andClauses.push('or(is_new_development.eq.false,is_new_development.is.null)');
-
-  if (andClauses.length === 1) {
-    const clause = andClauses[0];
-    if (clause.startsWith('or(')) {
-      params.or = `(${clause.slice(3, -1)})`;
-    } else {
-      params.and = `(${clause})`;
-    }
-  } else if (andClauses.length > 1) {
-    params.and = `(${andClauses.join(',')})`;
-  }
-
-  const ptSynonyms = getPropertyTypeSynonyms(alert.property_type);
-  if (ptSynonyms) {
-    params.property_type = `in.(${ptSynonyms.join(',')})`;
-  }
-
-  applyRangeFilters(params, [
-    ['price',   alert.min_price,    alert.max_price],
-    ['rooms',   alert.min_rooms,    alert.max_rooms],
-    ['size_m2', alert.min_size_m2,  alert.max_size_m2],
-  ]);
-
-  if (alert.min_bathrooms) params.bathrooms = `gte.${alert.min_bathrooms}`;
-
-  if (alert.has_pool === true)             params.has_swimming_pool    = 'eq.true';
-  if (alert.has_terrace === true)          params.has_terrace          = 'eq.true';
-  if (alert.has_garden === true)           params.has_garden           = 'eq.true';
-  if (alert.has_garage === true)           params.has_parking          = 'eq.true';
-  if (alert.has_elevator === true)         params.has_lift             = 'eq.true';
-  if (alert.has_air_conditioning === true) params.has_air_conditioning = 'eq.true';
-  if (alert.has_storage === true)          params.has_storage_room     = 'eq.true';
-
-  const result = await sbGet('listings', params);
-  if (result.status >= 400) {
-    console.error(`[alert-matcher] idealista-resales query ${result.status}:`, JSON.stringify(result.data));
+  let listings;
+  try {
+    listings = await searchIdealista(hardFilters);
+  } catch (err) {
+    console.error('[alert-matcher] idealista-resales live search faalde:', err.message);
     return [];
   }
-  return (result.data || []).map(normalizeIdealistaResale);
+
+  // searchIdealista kan bij sommige Apify-respons-shapes ook nieuwbouw mengen.
+  // Defensief: alleen niet-nieuwbouw items doorlaten (we hebben die al via
+  // matchUnits voor de bot's eigen DB).
+  return listings
+    .filter(l => l && !l.is_new_build)
+    .map(normalizeIdealistaApifyItem);
+}
+
+/**
+ * Vertaal alerts-tabel rij naar de hard_filters-shape die parser/searchIdealista
+ * verwachten. Idealista live search gaat alleen om resales.
+ */
+function alertToHardFilters(alert) {
+  const features = [];
+  if (alert.has_pool)             features.push('pool');
+  if (alert.has_terrace)          features.push('terrace');
+  if (alert.has_garden)           features.push('garden');
+  if (alert.has_garage)           features.push('garage');
+  if (alert.has_elevator)         features.push('elevator');
+  if (alert.has_air_conditioning) features.push('air_conditioning');
+  if (alert.has_storage)          features.push('storage');
+
+  return {
+    property_type: alert.property_type || null,
+    is_new_build: false,
+    operation: alert.operation || 'sale',
+    locations: effectiveLocations(alert),
+    neighborhoods: Array.isArray(alert.neighborhoods) ? alert.neighborhoods : [],
+    province: alert.province || null,
+    price_min: alert.min_price || null,
+    price_max: alert.max_price || null,
+    bedrooms_min: alert.min_rooms || null,
+    bedrooms_max: alert.max_rooms || null,
+    bathrooms_min: alert.min_bathrooms || null,
+    size_min_m2: alert.min_size_m2 || null,
+    size_max_m2: alert.max_size_m2 || null,
+    features,
+  };
 }
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
@@ -486,23 +462,26 @@ function normalizeResale(p) {
   };
 }
 
-function normalizeIdealistaResale(l) {
+function normalizeIdealistaApifyItem(l) {
+  const feats = Array.isArray(l.features) ? l.features : [];
   return {
     type: 'idealista_resale',
+    // l.id is de Idealista propertyCode — daarmee dedup'pen we in de caller.
+    code: String(l.id || ''),
     title: l.title || `${l.property_type || 'Property'} in ${l.municipality || l.province || '?'}`,
     location: [l.municipality, l.district].filter(Boolean).join(', '),
     price: Number(l.price) || 0,
-    beds: l.rooms || null,
+    beds: l.bedrooms || null,
     size_m2: l.size_m2 || null,
     url: l.url || null,
-    image: l.main_image_url || null,
+    image: l.thumbnail || null,
     features: {
-      pool: !!l.has_swimming_pool,
-      terrace: !!l.has_terrace,
-      garden: !!l.has_garden,
-      exterior: false,
-      floor: null,
-      description: null,
+      pool: feats.includes('pool'),
+      terrace: feats.includes('terrace'),
+      garden: feats.includes('garden'),
+      exterior: feats.includes('exterior'),
+      floor: l.floor || null,
+      description: (l.description || '').substring(0, 120) || null,
     },
     raw: l,
   };

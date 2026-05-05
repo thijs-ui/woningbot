@@ -26,6 +26,7 @@ const {
   getAlertsForUser,
   deactivateAlert,
   updateLastChecked,
+  updateIdealistaSeenCodes,
 } = require('./services/alert-service');
 const { findMatches } = require('./services/alert-matcher');
 const { WebClient: SlackWebClient } = require('@slack/web-api');
@@ -335,6 +336,35 @@ function buildAlertFilterText(alert) {
 }
 
 /**
+ * Background-job: na een nieuwe alert een test-batch DM versturen + seen-codes
+ * van Idealista persisteren. Apify-calls kunnen 30-90s duren, dus dit draait
+ * niet-blocking — de POST-response is allang terug.
+ */
+async function runInitialBatch(slackUserId, alert) {
+  // Geen limit: we hebben alle Idealista-codes nodig voor seen-codes,
+  // pas slice voor de DM zelf naar top 10.
+  const allMatches = await findMatches(alert, { cutoff: null });
+  const topMatches = allMatches.slice(0, 10);
+
+  await sendInitialBatchDM(slackUserId, alert, topMatches);
+  await updateLastChecked(alert.id);
+
+  // Persisteer ALLE huidige Idealista-codes (niet alleen die in de top-10
+  // DM zaten) zodat de cron deze morgen niet opnieuw als "nieuw" alert.
+  const idealistaCodes = allMatches
+    .filter(m => m.type === 'idealista_resale' && m.code)
+    .map(m => m.code);
+  if (idealistaCodes.length > 0) {
+    await updateIdealistaSeenCodes(alert.id, idealistaCodes);
+  }
+
+  console.log(
+    `[Alert] Initial-batch DM verstuurd voor ${alert.id.slice(0, 8)}: ` +
+    `${topMatches.length} in DM, ${idealistaCodes.length} idealista-codes opgeslagen`
+  );
+}
+
+/**
  * Stuur een test-batch DM met de huidige matches voor een net-aangemaakte alert.
  * Eenmalig direct na save zodat de gebruiker direct verifieert dat de alert werkt.
  * Daarna draait de daily cron normaal (delta-only via last_checked_at).
@@ -542,19 +572,12 @@ expressApp.post('/api/alert/save', async (req, res) => {
       `[${ts}] [Alert] Saved for ${user_email} (Slack ${slackUserId}) — klant "${klant_naam}", shortlist ${shortlist_id}`
     );
 
-    // 4. Initial-batch DM (test-modus): top 10 huidige matches versturen,
-    // daarna last_checked_at=NOW zodat de daily cron alleen nieuwe listings ziet.
-    // Faalt non-fataal: alert blijft staan ook als de DM struikelt.
-    try {
-      const matches = await findMatches(alert, { cutoff: null, limit: 10 });
-      await sendInitialBatchDM(slackUserId, alert, matches);
-      await updateLastChecked(alert.id);
-      console.log(
-        `[${ts}] [Alert] Initial-batch DM verstuurd voor ${alert.id.slice(0, 8)}: ${matches.length} matches`
-      );
-    } catch (dmErr) {
-      console.error(`[${ts}] [Alert] Initial-batch DM faalde (niet-fataal):`, dmErr.message);
-    }
+    // 4. Initial-batch DM (test-modus): fire-and-forget zodat de save-response
+    // niet wacht op de Idealista live-search (kan ~30-90s duren). User ziet
+    // direct "alert geactiveerd" in 't dashboard, DM arriveert async.
+    runInitialBatch(slackUserId, alert).catch(err =>
+      console.error(`[${ts}] [Alert] Initial-batch faalde voor ${alert.id.slice(0, 8)}:`, err.message)
+    );
 
     return res.json({ ok: true, alert });
   } catch (err) {
