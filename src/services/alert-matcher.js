@@ -21,6 +21,31 @@ const SUPABASE_URL = (
 // als fallback voor lokale dev. Aligned met alert-check.js precedence.
 const SUPABASE_KEY = process.env.SUPABASE_KEY || process.env.SUPABASE_ANON_KEY || '';
 
+// ─── Synoniemen-maps ───────────────────────────────────────────────────────
+// Parser noemt iets "villa" terwijl Idealista (listings) "chalet" gebruikt en
+// resales soms "detached house". Map naar alle bekende DB-varianten zodat we
+// op DB-niveau via `in.()` kunnen filteren zonder false negatives.
+
+const PROPERTY_TYPE_SYNONYMS = {
+  villa:         ['villa', 'chalet', 'detachedhouse', 'detached_house', 'house'],
+  apartment:     ['apartment', 'flat'],
+  flat:          ['apartment', 'flat'],
+  townhouse:     ['townhouse', 'semidetachedhouse', 'terracedhouse', 'semi_detached'],
+  penthouse:     ['penthouse'],
+  duplex:        ['duplex'],
+  bungalow:      ['bungalow'],
+  finca:         ['finca', 'countryhouse', 'country_house'],
+  country_house: ['finca', 'countryhouse', 'country_house'],
+  studio:        ['studio'],
+  plot:          ['plot', 'land'],
+};
+
+function getPropertyTypeSynonyms(parserType) {
+  if (!parserType) return null;
+  const key = String(parserType).toLowerCase().trim();
+  return PROPERTY_TYPE_SYNONYMS[key] || [key];
+}
+
 // ─── Public API ────────────────────────────────────────────────────────────
 
 /**
@@ -31,12 +56,22 @@ const SUPABASE_KEY = process.env.SUPABASE_KEY || process.env.SUPABASE_ANON_KEY |
  * @param {string|null} [opts.cutoff=null] - ISO date. Indien gezet: alleen
  *   items met first_seen_at >= cutoff. Null = alle bestaande inventory.
  * @param {number} [opts.limit] - cap op totaal aantal matches na merge+sort.
- *   Niet gezet = geen cap (caller bepaalt of slicen nodig is).
  * @param {string[]} [opts.sources=['units','resales']] - welke bronnen.
  * @returns {Promise<Match[]>} normalized matches, sorted by price asc.
  */
 async function findMatches(alert, opts = {}) {
-  const { cutoff = null, limit, sources = ['units', 'resales'] } = opts;
+  const { cutoff = null, limit } = opts;
+  let { sources = ['units', 'resales'] } = opts;
+
+  // Source-routing op alert-intent:
+  //   - operation=rent → resales (huur), units (nieuwbouw) is altijd sale → skip
+  //   - is_new_build=false → user wil expliciet bestaand → skip units
+  if (alert.operation === 'rent') {
+    sources = sources.filter(s => s !== 'units');
+  }
+  if (alert.is_new_build === false) {
+    sources = sources.filter(s => s !== 'units');
+  }
 
   const tasks = [];
   if (sources.includes('units'))   tasks.push(matchUnits(alert, cutoff));
@@ -50,17 +85,90 @@ async function findMatches(alert, opts = {}) {
 // ─── Source: nieuwbouw units (joined via listings) ─────────────────────────
 
 async function matchUnits(alert, cutoff) {
-  // Two-step: locatie zit op `listings`, niet op `units`. PostgREST embedded
-  // filters filteren wel de embed maar niet de parent — dus eerst listing-IDs
-  // ophalen die op locatie matchen, dán units ophalen via listing_id IN (...).
+  const locations = effectiveLocations(alert);
+  const neighborhoods = Array.isArray(alert.neighborhoods) ? alert.neighborhoods : [];
+  const province = alert.province || null;
+
+  // Step 1: listings-IDs filteren op alle listing-level criteria. Locatie zit
+  // op listings (niet op units) dus daar móét step 1 al narrowen. Property-type,
+  // is_new_build en alle has_*-features zijn ook listing-level → meenemen.
+  const listingParams = { select: 'id', limit: '1000' };
+
+  // Locatie + neighborhoods + province via and=(or(),or(),...) zodat alle
+  // condities AND'd zijn maar binnen elke groep OR.
+  const andClauses = [];
+  if (locations.length > 0) {
+    const ors = [];
+    for (const loc of locations) {
+      const safe = sanitizeIlike(loc);
+      if (!safe) continue;
+      ors.push(`municipality.ilike.%${safe}%`);
+      ors.push(`district.ilike.%${safe}%`);
+    }
+    if (ors.length > 0) andClauses.push(`or(${ors.join(',')})`);
+  }
+  if (neighborhoods.length > 0) {
+    const ors = [];
+    for (const nh of neighborhoods) {
+      const safe = sanitizeIlike(nh);
+      if (!safe) continue;
+      ors.push(`district.ilike.%${safe}%`);
+    }
+    if (ors.length > 0) andClauses.push(`or(${ors.join(',')})`);
+  }
+  if (province) {
+    const safe = sanitizeIlike(province);
+    if (safe) andClauses.push(`province.ilike.%${safe}%`);
+  }
+  if (andClauses.length === 1) {
+    // Strip outer or() voor schone top-level or= als enige groep.
+    const clause = andClauses[0];
+    if (clause.startsWith('or(')) {
+      listingParams.or = `(${clause.slice(3, -1)})`;
+    } else {
+      listingParams.and = `(${clause})`;
+    }
+  } else if (andClauses.length > 1) {
+    listingParams.and = `(${andClauses.join(',')})`;
+  }
+
+  // Property type via synonym-list (case-sensitive in DB, dus we trusten
+  // op lowercase-conventie; mapPropertyType in idealista-direct.js doet dit).
+  const ptSynonyms = getPropertyTypeSynonyms(alert.property_type);
+  if (ptSynonyms) {
+    listingParams.property_type = `in.(${ptSynonyms.join(',')})`;
+  }
+
+  // is_new_build true → alleen listings met is_new_development=true.
+  if (alert.is_new_build === true) {
+    listingParams.is_new_development = 'eq.true';
+  }
+
+  // Listing-level features (mapped van parser-naam naar DB-kolom).
+  if (alert.has_pool === true)             listingParams.has_swimming_pool   = 'eq.true';
+  if (alert.has_terrace === true)          listingParams.has_terrace         = 'eq.true';
+  if (alert.has_garden === true)           listingParams.has_garden          = 'eq.true';
+  if (alert.has_garage === true)           listingParams.has_parking         = 'eq.true';
+  if (alert.has_elevator === true)         listingParams.has_lift            = 'eq.true';
+  if (alert.has_air_conditioning === true) listingParams.has_air_conditioning = 'eq.true';
+  if (alert.has_storage === true)          listingParams.has_storage_room    = 'eq.true';
+
+  // Bathrooms zit op listing-niveau (niet op units) — filter hier.
+  if (alert.min_bathrooms) listingParams.bathrooms = `gte.${alert.min_bathrooms}`;
+
   let listingIds = null;
-  if (alert.location) {
-    const loc = sanitizeIlike(alert.location);
-    const result = await sbGet('listings', {
-      select: 'id',
-      or: `(municipality.ilike.%${loc}%,district.ilike.%${loc}%)`,
-      limit: '1000',
-    });
+  // Alleen step 1 doen als we daadwerkelijk filters opleggen (anders doen we
+  // 'k listings of zoek-id-ruis ophalen voor niets).
+  const hasListingFilter =
+    listingParams.or || listingParams.and ||
+    listingParams.property_type || listingParams.is_new_development ||
+    listingParams.has_swimming_pool || listingParams.has_terrace ||
+    listingParams.has_garden || listingParams.has_parking ||
+    listingParams.has_lift || listingParams.has_air_conditioning ||
+    listingParams.has_storage_room || listingParams.bathrooms;
+
+  if (hasListingFilter) {
+    const result = await sbGet('listings', listingParams);
     if (result.status >= 400) {
       console.error(`[alert-matcher] listings query ${result.status}:`, JSON.stringify(result.data));
       return [];
@@ -69,6 +177,7 @@ async function matchUnits(alert, cutoff) {
     if (listingIds.length === 0) return [];
   }
 
+  // Step 2: units met listing_id IN + alle units-level filters.
   const params = {
     select:
       'id,price,rooms,size_m2,floor,has_terrace,has_garden,is_exterior,first_seen_at,' +
@@ -80,16 +189,15 @@ async function matchUnits(alert, cutoff) {
   if (listingIds) params.listing_id = `in.(${listingIds.join(',')})`;
   if (cutoff)     params.first_seen_at = `gte.${cutoff}`;
 
-  if (alert.min_price && alert.max_price) {
-    params.and = `(price.gte.${alert.min_price},price.lte.${alert.max_price})`;
-  } else if (alert.min_price) {
-    params.price = `gte.${alert.min_price}`;
-  } else if (alert.max_price) {
-    params.price = `lte.${alert.max_price}`;
-  }
+  // Range-filters: min+max paren via and=(...,...,...). One-sided via top-level
+  // simple filter. Top-level params + and=() worden door PostgREST AND'd.
+  applyRangeFilters(params, [
+    ['price',    alert.min_price,    alert.max_price],
+    ['rooms',    alert.min_rooms,    alert.max_rooms],
+    ['size_m2',  alert.min_size_m2,  alert.max_size_m2],
+  ]);
 
-  if (alert.min_rooms)            params.rooms       = `gte.${alert.min_rooms}`;
-  if (alert.min_size_m2)          params.size_m2     = `gte.${alert.min_size_m2}`;
+  // Units-level features (zelden gezet maar wel ondersteund).
   if (alert.has_terrace === true) params.has_terrace = 'eq.true';
   if (alert.has_garden === true)  params.has_garden  = 'eq.true';
 
@@ -98,45 +206,71 @@ async function matchUnits(alert, cutoff) {
     console.error(`[alert-matcher] units query ${result.status}:`, JSON.stringify(result.data));
     return [];
   }
-
-  let units = (result.data || []).filter(u => u.listing);
-  // has_pool zit alleen op listings-niveau, niet op units. Post-filter blijft
-  // hier nodig — geen alternatief in het schema.
-  if (alert.has_pool === true) {
-    units = units.filter(u => u.listing.has_swimming_pool);
-  }
-  return units.map(normalizeUnit);
+  return (result.data || []).filter(u => u.listing).map(normalizeUnit);
 }
 
 // ─── Source: Costa Select resales (flat tabel) ─────────────────────────────
 
 async function matchResales(alert, cutoff) {
+  const locations = effectiveLocations(alert);
+  const province = alert.province || null;
+
   const params = {
     select:
       'ref,price,currency,property_type,town,province,beds,baths,' +
       'built_m2,pool,new_build,features,desc_nl,desc_en,images,url,first_seen_at',
-    price_freq: 'eq.sale',
+    price_freq: alert.operation === 'rent' ? 'eq.rent' : 'eq.sale',
     order: 'price.asc',
     limit: '500',
   };
   if (cutoff) params.first_seen_at = `gte.${cutoff}`;
 
-  if (alert.location) {
-    const loc = sanitizeIlike(alert.location);
-    params.or = `(town.ilike.%${loc}%,province.ilike.%${loc}%)`;
+  // Locatie + province via and=(or(),...). Resales heeft geen district/wijk
+  // veld, dus neighborhoods skippen we voor deze bron.
+  const andClauses = [];
+  if (locations.length > 0) {
+    const ors = [];
+    for (const loc of locations) {
+      const safe = sanitizeIlike(loc);
+      if (!safe) continue;
+      ors.push(`town.ilike.%${safe}%`);
+      ors.push(`province.ilike.%${safe}%`);
+    }
+    if (ors.length > 0) andClauses.push(`or(${ors.join(',')})`);
+  }
+  if (province) {
+    const safe = sanitizeIlike(province);
+    if (safe) andClauses.push(`province.ilike.%${safe}%`);
+  }
+  if (andClauses.length === 1) {
+    const clause = andClauses[0];
+    if (clause.startsWith('or(')) {
+      params.or = `(${clause.slice(3, -1)})`;
+    } else {
+      params.and = `(${clause})`;
+    }
+  } else if (andClauses.length > 1) {
+    params.and = `(${andClauses.join(',')})`;
   }
 
-  if (alert.min_price && alert.max_price) {
-    params.and = `(price.gte.${alert.min_price},price.lte.${alert.max_price})`;
-  } else if (alert.min_price) {
-    params.price = `gte.${alert.min_price}`;
-  } else if (alert.max_price) {
-    params.price = `lte.${alert.max_price}`;
+  // Property type
+  const ptSynonyms = getPropertyTypeSynonyms(alert.property_type);
+  if (ptSynonyms) {
+    params.property_type = `in.(${ptSynonyms.join(',')})`;
   }
 
-  if (alert.min_rooms)         params.beds     = `gte.${alert.min_rooms}`;
-  if (alert.min_size_m2)       params.built_m2 = `gte.${alert.min_size_m2}`;
-  if (alert.has_pool === true) params.pool     = 'eq.true';
+  // is_new_build
+  if (alert.is_new_build === true)  params.new_build = 'eq.true';
+  if (alert.is_new_build === false) params.new_build = 'eq.false';
+
+  applyRangeFilters(params, [
+    ['price',    alert.min_price,    alert.max_price],
+    ['beds',     alert.min_rooms,    alert.max_rooms],
+    ['built_m2', alert.min_size_m2,  alert.max_size_m2],
+  ]);
+
+  if (alert.min_bathrooms)     params.baths = `gte.${alert.min_bathrooms}`;
+  if (alert.has_pool === true) params.pool  = 'eq.true';
 
   const result = await sbGet('resales_properties', params);
   if (result.status >= 400) {
@@ -144,6 +278,49 @@ async function matchResales(alert, cutoff) {
     return [];
   }
   return (result.data || []).map(normalizeResale);
+}
+
+// ─── Helpers ───────────────────────────────────────────────────────────────
+
+/**
+ * Pas range-filters (min+max paren) toe op een PostgREST params-object.
+ * Min+max paren gaan in een gecombineerd and=(...) zodat één param meerdere
+ * predicates op verschillende kolommen kan dragen. Eenzijdige filters gaan
+ * direct als top-level param. Top-level params + and=() worden AND'd.
+ *
+ * @param {Object} params - mutable PostgREST params object
+ * @param {Array<[string, any, any]>} ranges - tuples van [column, min, max]
+ */
+function applyRangeFilters(params, ranges) {
+  const existingAnd = params.and ? params.and.slice(1, -1) : '';
+  const andParts = existingAnd ? [existingAnd] : [];
+
+  for (const [col, min, max] of ranges) {
+    if (min && max) {
+      andParts.push(`${col}.gte.${min}`);
+      andParts.push(`${col}.lte.${max}`);
+    } else if (min) {
+      params[col] = `gte.${min}`;
+    } else if (max) {
+      params[col] = `lte.${max}`;
+    }
+  }
+
+  if (andParts.length > 0) {
+    params.and = `(${andParts.join(',')})`;
+  }
+}
+
+/**
+ * Single source van alert-locaties: locations[] indien gezet, anders fallback
+ * naar [location] voor backward-compat met oude alerts (pre-migratie 004).
+ */
+function effectiveLocations(alert) {
+  if (Array.isArray(alert.locations) && alert.locations.length > 0) {
+    return alert.locations.filter(Boolean);
+  }
+  if (alert.location) return [alert.location];
+  return [];
 }
 
 // ─── Normalizers ───────────────────────────────────────────────────────────
@@ -194,8 +371,6 @@ function normalizeResale(p) {
     raw: p,
   };
 }
-
-// ─── Helpers ───────────────────────────────────────────────────────────────
 
 /**
  * Strip karakters die de PostgREST or=(...,...) syntax of ilike-pattern kunnen

@@ -283,6 +283,58 @@ async function lookupSlackUserByEmail(email) {
 }
 
 /**
+ * Bouw een leesbare samenvatting van alle ingestelde alert-filters. Wordt in de
+ * DM-banner getoond zodat de user precies ziet wat is toegepast.
+ */
+function buildAlertFilterText(alert) {
+  const parts = [];
+
+  const locs = (Array.isArray(alert.locations) && alert.locations.length > 0)
+    ? alert.locations
+    : (alert.location ? [alert.location] : []);
+  if (locs.length > 0) parts.push(locs.join(' / '));
+  if (Array.isArray(alert.neighborhoods) && alert.neighborhoods.length > 0) {
+    parts.push(`wijk ${alert.neighborhoods.join(', ')}`);
+  }
+  if (alert.province && locs.length === 0) parts.push(`provincie ${alert.province}`);
+
+  if (alert.property_type)         parts.push(alert.property_type);
+  if (alert.is_new_build === true)  parts.push('alleen nieuwbouw');
+  if (alert.is_new_build === false) parts.push('alleen bestaand');
+  if (alert.operation === 'rent')   parts.push('huur');
+
+  if (alert.min_price && alert.max_price) {
+    parts.push(`€${Number(alert.min_price).toLocaleString('nl-NL')}–€${Number(alert.max_price).toLocaleString('nl-NL')}`);
+  } else if (alert.min_price) {
+    parts.push(`min €${Number(alert.min_price).toLocaleString('nl-NL')}`);
+  } else if (alert.max_price) {
+    parts.push(`max €${Number(alert.max_price).toLocaleString('nl-NL')}`);
+  }
+
+  if (alert.min_rooms && alert.max_rooms) parts.push(`${alert.min_rooms}–${alert.max_rooms} slpk`);
+  else if (alert.min_rooms)               parts.push(`${alert.min_rooms}+ slpk`);
+  else if (alert.max_rooms)               parts.push(`max ${alert.max_rooms} slpk`);
+
+  if (alert.min_size_m2 && alert.max_size_m2) parts.push(`${alert.min_size_m2}–${alert.max_size_m2}m²`);
+  else if (alert.min_size_m2)                 parts.push(`min ${alert.min_size_m2}m²`);
+  else if (alert.max_size_m2)                 parts.push(`max ${alert.max_size_m2}m²`);
+
+  if (alert.min_bathrooms) parts.push(`${alert.min_bathrooms}+ badk.`);
+
+  const feats = [];
+  if (alert.has_pool)             feats.push('zwembad');
+  if (alert.has_terrace)          feats.push('terras');
+  if (alert.has_garden)           feats.push('tuin');
+  if (alert.has_garage)           feats.push('garage');
+  if (alert.has_elevator)         feats.push('lift');
+  if (alert.has_air_conditioning) feats.push('airco');
+  if (alert.has_storage)          feats.push('berging');
+  if (feats.length > 0) parts.push(feats.join(' · '));
+
+  return parts.length > 0 ? parts.join(', ') : 'alle criteria';
+}
+
+/**
  * Stuur een test-batch DM met de huidige matches voor een net-aangemaakte alert.
  * Eenmalig direct na save zodat de gebruiker direct verifieert dat de alert werkt.
  * Daarna draait de daily cron normaal (delta-only via last_checked_at).
@@ -291,11 +343,7 @@ async function sendInitialBatchDM(slackUserId, alert, matches) {
   const slack = getSlackClient();
   if (!slack) throw new Error('SLACK_BOT_TOKEN not configured');
 
-  const filterParts = [];
-  if (alert.location) filterParts.push(alert.location);
-  if (alert.max_price) filterParts.push(`max €${Number(alert.max_price).toLocaleString('nl-NL')}`);
-  if (alert.min_rooms) filterParts.push(`${alert.min_rooms}+ slpk`);
-  const filterText = filterParts.length > 0 ? filterParts.join(', ') : 'alle criteria';
+  const filterText = buildAlertFilterText(alert);
   const klantPrefix = alert.klant_naam ? `👤 *${alert.klant_naam}* — ` : '';
 
   if (matches.length === 0) {
@@ -436,24 +484,53 @@ expressApp.post('/api/alert/save', async (req, res) => {
 
   const hf = parsed.hard_filters || {};
   const features = Array.isArray(hf.features) ? hf.features : [];
+  const locations = Array.isArray(hf.locations)
+    ? hf.locations.filter(Boolean)
+    : (hf.locations ? [hf.locations] : []);
+  const neighborhoods = Array.isArray(hf.neighborhoods)
+    ? hf.neighborhoods.filter(Boolean)
+    : [];
 
-  // 3. Save alert
+  // 3. Save alert — all parser-velden meesturen zodat de matcher precies kan
+  // filteren wat de user gevraagd heeft (zie alert-matcher.js).
   try {
     const alert = await saveAlert({
       slack_user_id: slackUserId,
-      slack_channel_id: slackUserId, // DM via user_id — alert-check.js DM't ook naar slack_user_id
+      slack_channel_id: slackUserId,
       shortlist_id,
       klant_naam: klant_naam || null,
       query_text,
       dashboard_user_email: user_email,
-      location: Array.isArray(hf.locations) && hf.locations.length > 0 ? hf.locations[0] : null,
+
+      // Locaties
+      location: locations[0] || null, // backward compat met oude rijen
+      locations: locations.length > 0 ? locations : null,
+      neighborhoods: neighborhoods.length > 0 ? neighborhoods : null,
+      province: hf.province || null,
+
+      // Property type & build status & operation
+      property_type: hf.property_type || null,
+      is_new_build: typeof hf.is_new_build === 'boolean' ? hf.is_new_build : null,
+      operation: hf.operation || 'sale',
+
+      // Prijs / kamers / oppervlakte / badkamers
       min_price: hf.price_min || null,
       max_price: hf.price_max || null,
       min_rooms: hf.bedrooms_min || null,
+      max_rooms: hf.bedrooms_max || null,
+      min_bathrooms: hf.bathrooms_min || null,
       min_size_m2: hf.size_min_m2 || null,
-      has_pool: features.includes('pool') || null,
-      has_terrace: features.includes('terrace') || null,
-      has_garden: features.includes('garden') || null,
+      max_size_m2: hf.size_max_m2 || null,
+
+      // Features
+      has_pool:             features.includes('pool')             || null,
+      has_terrace:          features.includes('terrace')          || null,
+      has_garden:           features.includes('garden')           || null,
+      has_garage:           features.includes('garage')           || null,
+      has_elevator:         features.includes('elevator')         || null,
+      has_air_conditioning: features.includes('air_conditioning') || null,
+      has_storage:          features.includes('storage')          || null,
+
       is_active: true,
     });
 
