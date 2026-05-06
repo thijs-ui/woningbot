@@ -228,7 +228,10 @@ function pickBestListing(cluster) {
 
   // Merge data from other listings
   const others = cluster.filter((_, i) => i !== bestIdx);
-  const alsoOn = others.map(l => l.source).filter(Boolean);
+  // Dedupe sources zodat "Ook gevonden op:" niet ['idealista','idealista',
+  // 'idealista',...] wordt als de cluster veel duplicates uit dezelfde bron
+  // heeft. Frontend toont 't anders als een lange opsomming.
+  const alsoOn = [...new Set(others.map(l => l.source).filter(Boolean))];
 
   // Add "also on" reference
   best.also_on = alsoOn;
