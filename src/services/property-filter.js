@@ -204,10 +204,21 @@ function isPropertyTypeMatch(requestedType, listingType, listingTitle) {
     return true;
   }
 
-  // Penthouse
+  // Penthouse — Idealista heeft geen vaste penthouse-categorie; veel
+  // penthouses worden gemapt als 'flat' met 'ático' / 'penthouse' in de
+  // titel. Strict op type filtert vrijwel alles weg. Accept dus:
+  //  - expliciete penthouse-types, OF
+  //  - flat/apartment types waarbij de titel het signaleert.
+  // Selector beoordeelt daarna verder op de beschrijving.
   if (requested === 'penthouse') {
-    if (actual && !actual.includes('penthouse') && !actual.includes('ático') && !actual.includes('atico')) return false;
-    return true;
+    const isPenthouseType = actual.includes('penthouse') || actual.includes('ático') || actual.includes('atico');
+    const isFlatType = actual.includes('flat') || actual.includes('apartment') ||
+                       actual.includes('piso') || actual.includes('apartamento');
+    const titleMentions = title.includes('penthouse') || title.includes('ático') || title.includes('atico');
+    if (!actual || actual === 'null') return true;
+    if (isPenthouseType) return true;
+    if (isFlatType && titleMentions) return true;
+    return false;
   }
 
   // Townhouse
