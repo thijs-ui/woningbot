@@ -83,11 +83,8 @@ STRIKTE REGELS:
   • Verkeerd property_type (bijv. halfvrijstaand/townhouse terwijl villa/chalet is gevraagd) → NIET selecteren
   • Te weinig slaapkamers (onder bedrooms_min) → NIET selecteren
 - property_type "villa" = ALLEEN vrijstaande villa's/chalets. Geen halfvrijstaand, adosado, pareado, townhouse, of semi-detached.
-- Selecteer MAXIMAAL 10 woningen. Als er minder dan 10 goed passen, selecteer er minder. Kwaliteit boven kwantiteit.
-- match_score 90+ = uitstekende match
-- match_score 70-89 = goede match met kleine compromissen (alleen zachte criteria, NIET harde filters)
-- match_score 50-69 = redelijke match, afwijkingen in zachte criteria
-- Onder 50: niet selecteren.
+- Selecteer ALTIJD 10 woningen als er minstens 10 woningen in de pool zitten die de harde filters halen. Als de pool kleiner is dan 10: selecteer ALLE woningen die de harde filters halen. Geen "kwaliteit boven kwantiteit"-cutoff op zachte criteria — de consultant wil opties zien en zelf kiezen, niet jouw voorkeur opgelegd krijgen.
+- match_score reflecteert de match-kwaliteit (90+ uitstekend, 70-89 goed, 50-69 redelijk, <50 zwak), maar lage scores zijn GEEN reden om iets niet te selecteren — sorteer ze gewoon onderaan en motiveer eerlijk in reasons_against waarom de score laag is.
 - Wees eerlijk over minpunten in de motivatie. De consultant moet de klant goed kunnen adviseren.
 - Als een woning een dealbreaker heeft: niet selecteren, ook niet als de rest perfect is.
 - Gebruik je locatiekennis om de motivatie te verrijken (bijv. "Gelegen in Nueva Andalucía, populair bij expats met goede internationale scholen in de buurt").
