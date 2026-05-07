@@ -204,21 +204,20 @@ function isPropertyTypeMatch(requestedType, listingType, listingTitle) {
     return true;
   }
 
-  // Penthouse — Idealista heeft geen vaste penthouse-categorie; veel
-  // penthouses worden gemapt als 'flat' met 'ático' / 'penthouse' in de
-  // titel. Strict op type filtert vrijwel alles weg. Accept dus:
-  //  - expliciete penthouse-types, OF
-  //  - flat/apartment types waarbij de titel het signaleert.
-  // Selector beoordeelt daarna verder op de beschrijving.
+  // Penthouse — Idealista heeft geen vaste penthouse-categorie en levert
+  // de title vaak als generieke fallback ("Flat in Estepona, ..."), zonder
+  // 'penthouse'/'ático' hint. Strict op type/title filtert dan vrijwel
+  // alles weg. Pragmatische pre-filter: laat alle flat/apartment types
+  // door en laat de Claude-selector op basis van de beschrijving
+  // bepalen of het echt een penthouse is. Reject alleen ondubbelzinnig
+  // niet-flats (villa, townhouse, country house).
   if (requested === 'penthouse') {
-    const isPenthouseType = actual.includes('penthouse') || actual.includes('ático') || actual.includes('atico');
-    const isFlatType = actual.includes('flat') || actual.includes('apartment') ||
-                       actual.includes('piso') || actual.includes('apartamento');
-    const titleMentions = title.includes('penthouse') || title.includes('ático') || title.includes('atico');
     if (!actual || actual === 'null') return true;
-    if (isPenthouseType) return true;
-    if (isFlatType && titleMentions) return true;
-    return false;
+    const rejectTypes = ['villa', 'chalet', 'detached', 'townhouse', 'adosado',
+      'pareado', 'semi-detached', 'terraced', 'countryhouse', 'country_house',
+      'finca', 'plot'];
+    if (rejectTypes.some(t => actual.includes(t))) return false;
+    return true;
   }
 
   // Townhouse
