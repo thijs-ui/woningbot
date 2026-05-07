@@ -9,6 +9,25 @@
 --
 -- Alleen resales — listings (nieuwbouw-units) hebben geen plot-veld.
 
+-- Stap 1: drop de oude overload (11 parameters, zonder filter_plot_min).
+-- CREATE OR REPLACE matcht alleen op exact dezelfde signature; het
+-- toevoegen van een parameter zou anders een tweede overload aanmaken
+-- waardoor PostgREST de RPC niet meer eenduidig kan resolven.
+drop function if exists search_resales_hybrid(
+  vector(1536),
+  int,
+  numeric,
+  numeric,
+  int,
+  int,
+  int,
+  text,
+  text[],
+  boolean,
+  boolean
+);
+
+-- Stap 2: create de nieuwe versie met filter_plot_min als 12e parameter.
 create or replace function search_resales_hybrid(
   query_embedding vector(1536) default null,
   match_count int default 30,
