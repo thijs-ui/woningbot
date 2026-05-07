@@ -39,6 +39,21 @@ function normalizeQuery(text) {
   s = s.replace(/\beuro\b/gi, '');
   s = s.replace(/\beuros\b/gi, '');
 
+  // 1b. Range-notatie zoals "1-1.5M", "500-700k", "500–700k" (ook
+  // en-dash/em-dash) of "1 tot 1.5 miljoen". Propageer de suffix naar
+  // beide getallen vóór de individuele M/k-replaces — anders mist de
+  // eerste waarde de denominatie en interpreteert Claude '1' in '1-1.5M'
+  // als één euro i.p.v. één miljoen, waardoor de ondergrens effectief
+  // wegvalt en woningen ver onder de gewenste range alsnog door komen.
+  s = s.replace(
+    /(\d+(?:[.,]\d+)?)\s*(?:[-–—]|\bt(?:ot|o)\b)\s*(\d+(?:[.,]\d+)?)\s*(miljoen|mln|M|duizend|[kK])\b/g,
+    (m, a, b, suffix) => {
+      const out = `${a}${suffix}-${b}${suffix}`;
+      replacements.push({ from: m, to: out });
+      return out;
+    }
+  );
+
   // 2. Million suffixes
   // 2a. "miljoen" / "mln" — case-insensitief, na een getal
   s = s.replace(/(\d+(?:[.,]\d+)?)\s*(?:miljoen|mln)\b/gi, (m, num) => {
