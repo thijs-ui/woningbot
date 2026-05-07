@@ -140,6 +140,24 @@ function preparePropertiesForClaude(properties) {
  * @param {Array} properties - All scraped properties
  * @returns {object} Claude's selection response
  */
+/**
+ * Robuuste JSON-extractie uit een Claude-response. Strip markdown-fences en
+ * pak het EERSTE JSON-object via regex. Voorkomt dat een trailing tekst-blokje
+ * (uitleg, comment) na de JSON de hele parse laat falen — wat eerder gebeurde
+ * bij b.v. "Finca Mijas" waar Claude na een korte selections-array nog tekst
+ * toevoegde en JSON.parse crashte op "non-whitespace character after JSON".
+ */
+function extractJson(text) {
+  const stripped = text.replace(/^```(?:json)?\n?/, '').replace(/\n?```$/, '').trim();
+  const match = stripped.match(/\{[\s\S]*\}/);
+  const candidate = match ? match[0] : stripped;
+  try {
+    return { ok: true, value: JSON.parse(candidate) };
+  } catch (err) {
+    return { ok: false, error: err.message, raw: stripped };
+  }
+}
+
 async function selectProperties(clientProfile, properties) {
   const preparedProps = preparePropertiesForClaude(properties);
 
@@ -149,19 +167,41 @@ ${JSON.stringify(clientProfile, null, 2)}
 WONINGEN (${preparedProps.length} gevonden):
 ${JSON.stringify(preparedProps, null, 2)}`;
 
-  const response = await claudeRetry(client, {
-    model: CLAUDE_MODEL,
-    max_tokens: 4096,
-    system: SYSTEM_PROMPT,
-    messages: [{ role: 'user', content: userMessage }],
-  }, { label: 'ClaudeSelector' });
+  const conversation = [{ role: 'user', content: userMessage }];
+  let lastError = null;
 
-  const text = response.content[0].text.trim();
-  const cleaned = text.replace(/^```(?:json)?\n?/, '').replace(/\n?```$/, '').trim();
-  const parsed = JSON.parse(cleaned);
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    const response = await claudeRetry(client, {
+      model: CLAUDE_MODEL,
+      max_tokens: 4096,
+      system: SYSTEM_PROMPT,
+      messages: conversation,
+    }, { label: `ClaudeSelector:attempt${attempt}` });
 
-  console.log(`[Claude Selector] Selected ${parsed.selections?.length || 0} properties`);
-  return parsed;
+    const text = response.content[0].text.trim();
+    const result = extractJson(text);
+
+    if (result.ok) {
+      console.log(`[Claude Selector] Selected ${result.value.selections?.length || 0} properties`);
+      return result.value;
+    }
+
+    lastError = result.error;
+    console.warn(`[Claude Selector] Attempt ${attempt} JSON-parse failed: ${result.error}`);
+    if (attempt < 2) {
+      conversation.push(
+        { role: 'assistant', content: text },
+        {
+          role: 'user',
+          content:
+            `Je vorige antwoord was geen geldige JSON (parser-fout: "${result.error}"). ` +
+            `Geef ALLEEN het JSON-object terug volgens het schema, zonder uitleg ervoor of erna en zonder markdown fences.`,
+        }
+      );
+    }
+  }
+
+  throw new Error(`Claude Selector failed: invalid JSON after retry (${lastError})`);
 }
 
 module.exports = { selectProperties, truncateDescription };
