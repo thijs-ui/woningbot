@@ -33,6 +33,8 @@ Geef ALLEEN valid JSON terug. Geen tekst eromheen.
     "bathrooms_min": nummer of null,
     "size_min_m2": nummer of null,
     "size_max_m2": nummer of null,
+    "plot_min_m2": nummer of null,
+    "plot_max_m2": nummer of null,
     "features": ["pool","garage","terrace","garden","elevator","air_conditioning","security","storage"],
     "project_name": "naam van een specifiek nieuwbouwproject als de gebruiker daarnaar vraagt, anders null"
   },
@@ -84,7 +86,14 @@ PROJECTNAMEN:
 - "Privacy" = soft_criteria must_have ["afgelegen/privacy"]
 - "Moderne maar warme stijl" = style_preferences
 - "Ingegraven zwembad" = must_have (niet hetzelfde als gewoon "pool" in harde filters)
-- Als iets niet afleidbaar is, gebruik null of lege array.`;
+- Als iets niet afleidbaar is, gebruik null of lege array.
+
+OPPERVLAKTE — perceel vs woonoppervlak:
+- "perceel", "grond", "land", "tuin van X m²", "plot" → plot_min_m2 / plot_max_m2
+- "woonoppervlak", "woonopp", "m² woon", "indoor", "leefoppervlak", "bebouwd" → size_min_m2 / size_max_m2
+- "X m²" zonder context → size_min_m2 (woonoppervlak is de standaard-interpretatie)
+- "perceel 2000m²+" → plot_min_m2: 2000, plot_max_m2: null
+- "tuin minimaal 1000m²" → plot_min_m2: 1000`;
 
 /**
  * Validate the structure of Claude's parsed output.
@@ -107,7 +116,7 @@ function validateClientProfile(parsed) {
   if (hf.neighborhoods !== undefined && hf.neighborhoods !== null && !Array.isArray(hf.neighborhoods)) {
     errors.push('hard_filters.neighborhoods moet een array zijn (kan leeg zijn)');
   }
-  for (const key of ['price_min', 'price_max', 'bedrooms_min', 'bedrooms_max', 'bathrooms_min', 'size_min_m2', 'size_max_m2']) {
+  for (const key of ['price_min', 'price_max', 'bedrooms_min', 'bedrooms_max', 'bathrooms_min', 'size_min_m2', 'size_max_m2', 'plot_min_m2', 'plot_max_m2']) {
     if (hf[key] != null && typeof hf[key] !== 'number') {
       errors.push(`hard_filters.${key} moet number of null zijn (is nu ${typeof hf[key]})`);
     }

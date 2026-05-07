@@ -69,6 +69,7 @@ function mapRow(row) {
     bedrooms:      row.beds,
     bathrooms:     row.baths,
     size_m2:       row.built_m2,
+    plot_m2:       row.plot_m2 ?? null,
     floor:         null,
     url:           row.url || null,
     thumbnail,
@@ -108,6 +109,7 @@ function buildRpcBody(hardFilters, queryEmbedding, matchCount) {
     filter_bedrooms_min: hardFilters.bedrooms_min ?? null,
     filter_bathrooms_min: hardFilters.bathrooms_min ?? null,
     filter_size_min: hardFilters.size_min_m2 ?? null,
+    filter_plot_min: hardFilters.plot_min_m2 ?? null,
     filter_property_type: null, // bewust niet gefilterd op DB-niveau (parser-types ≠ DB-types)
     filter_locations:
       Array.isArray(hardFilters.locations) && hardFilters.locations.length > 0

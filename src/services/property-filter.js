@@ -22,7 +22,7 @@ function preFilterListings(listings, hardFilters) {
   if (!hardFilters) return listings;
 
   const before = listings.length;
-  let removed = { price: 0, type: 0, bedrooms: 0, size: 0 };
+  let removed = { price: 0, type: 0, bedrooms: 0, size: 0, plot: 0 };
 
   const filtered = listings.filter(listing => {
     // Price filter — strict, no tolerance
@@ -63,12 +63,24 @@ function preFilterListings(listings, hardFilters) {
       return false;
     }
 
+    // Plot filter — alleen actief als de listing plot_m2 levert. Idealista
+    // search-API geeft geen plot-veld terug; die listings vallen door en
+    // worden door de selector beoordeeld via de beschrijving.
+    if (hardFilters.plot_min_m2 && listing.plot_m2 && listing.plot_m2 < hardFilters.plot_min_m2) {
+      removed.plot++;
+      return false;
+    }
+    if (hardFilters.plot_max_m2 && listing.plot_m2 && listing.plot_m2 > hardFilters.plot_max_m2) {
+      removed.plot++;
+      return false;
+    }
+
     return true;
   });
 
   const totalRemoved = before - filtered.length;
   if (totalRemoved > 0) {
-    console.log(`[PropertyFilter] Pre-filter: ${before} → ${filtered.length} (removed ${totalRemoved}: price=${removed.price}, type=${removed.type}, beds=${removed.bedrooms}, size=${removed.size})`);
+    console.log(`[PropertyFilter] Pre-filter: ${before} → ${filtered.length} (removed ${totalRemoved}: price=${removed.price}, type=${removed.type}, beds=${removed.bedrooms}, size=${removed.size}, plot=${removed.plot})`);
   }
 
   return filtered;
@@ -127,6 +139,18 @@ function postValidateSelections(selections, allProperties, hardFilters) {
     if (hardFilters.bedrooms_min && prop.bedrooms && prop.bedrooms < hardFilters.bedrooms_min) {
       valid = false;
       reasons.push(`bedrooms ${prop.bedrooms} < min ${hardFilters.bedrooms_min}`);
+    }
+
+    // Plot check (alleen als plot_m2 op de listing aanwezig is — Idealista
+    // search-API levert het niet, dus die listings worden door de selector
+    // beoordeeld op de beschrijving).
+    if (hardFilters.plot_min_m2 && prop.plot_m2 && prop.plot_m2 < hardFilters.plot_min_m2) {
+      valid = false;
+      reasons.push(`plot ${prop.plot_m2}m² < min ${hardFilters.plot_min_m2}m²`);
+    }
+    if (hardFilters.plot_max_m2 && prop.plot_m2 && prop.plot_m2 > hardFilters.plot_max_m2) {
+      valid = false;
+      reasons.push(`plot ${prop.plot_m2}m² > max ${hardFilters.plot_max_m2}m²`);
     }
 
     if (valid) {
