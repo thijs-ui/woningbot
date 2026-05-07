@@ -438,8 +438,17 @@ function normalizeUnit(u) {
   };
 }
 
+// Zelfde defensieve extractor als in supabase-search — images-kolom kan
+// string-array of object-array zijn afhankelijk van welke scraper de row
+// schreef.
+function extractImageUrl(img) {
+  if (!img) return null;
+  if (typeof img === 'string') return img;
+  return img.url || img.src || img.href || null;
+}
+
 function normalizeResale(p) {
-  const images = (p.images || []).map(img => img?.url).filter(Boolean);
+  const images = (p.images || []).map(extractImageUrl).filter(Boolean);
   const desc = (p.desc_nl || p.desc_en || '').substring(0, 120);
   return {
     type: 'resale',

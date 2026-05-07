@@ -50,8 +50,19 @@ function mapFeatures(featuresArr, pool, newBuild) {
 
 // ─── Map RPC row to internal listing format ────────────────────────────────
 
+// resales_properties.images is een jsonb kolom die door verschillende scrapers
+// gevuld wordt — shape varieert tussen object-array ([{url}]), string-array
+// (["..."]) en occasioneel andere keys (src/href). Defensieve extractor pakt
+// alle gangbare vormen, anders verliezen we sporadisch alle foto's voor een
+// listing terwijl ze wel in de DB staan.
+function extractImageUrl(img) {
+  if (!img) return null;
+  if (typeof img === 'string') return img;
+  return img.url || img.src || img.href || null;
+}
+
 function mapRow(row) {
-  const images = (row.images || []).map(img => img?.url).filter(Boolean);
+  const images = (row.images || []).map(extractImageUrl).filter(Boolean);
   const thumbnail = images[0] || null;
   const features = mapFeatures(row.features, row.pool, row.new_build);
   const description = (row.desc_nl || row.desc_en || '').substring(0, 500);
