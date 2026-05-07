@@ -836,6 +836,45 @@ async function handleNewSearch(queryText, log = null) {
   }
 
   const selections = postValidateSelections(selectionResult.selections || [], allProperties, hardFilters);
+
+  // Defensieve fallback: als Claude minder dan 10 selecties levert terwijl
+  // de pool ≥10 listings heeft die alle hard-filters halen, vul aan met
+  // top-remaining op similarity (of prijs ASC bij geen embedding). Geen
+  // motivation/highlights — die laten we leeg, frontend toont dan alleen
+  // de specs. Voorkomt dat consultants 0-2 woningen krijgen terwijl er
+  // 100+ kandidaten in de pool zitten.
+  const TARGET_SELECTIONS = 10;
+  if (selections.length < TARGET_SELECTIONS && allProperties.length >= TARGET_SELECTIONS) {
+    const used = new Set(
+      selections
+        .map(s => [s.property_id, String(s.property_id)])
+        .flat()
+    );
+    const remaining = allProperties
+      .filter(p => !used.has(p.id) && !used.has(p.url) && !used.has(String(p.id)))
+      .sort((a, b) => {
+        const sa = typeof a.similarity === 'number' ? a.similarity : 0;
+        const sb = typeof b.similarity === 'number' ? b.similarity : 0;
+        if (sb !== sa) return sb - sa;
+        const pa = typeof a.price === 'number' ? a.price : Infinity;
+        const pb = typeof b.price === 'number' ? b.price : Infinity;
+        return pa - pb;
+      });
+    while (selections.length < TARGET_SELECTIONS && remaining.length > 0) {
+      const next = remaining.shift();
+      if (!next) break;
+      selections.push({
+        property_id: next.id || next.url,
+        match_score: 50,
+        motivation: 'Past binnen je harde filters — extra kandidaat op basis van match-ranking.',
+        highlights: [],
+        reasons_for: [],
+        reasons_against: [],
+      });
+    }
+    console.log(`[${ts}] [API] Selector gaf ${selectionResult.selections?.length || 0}; aangevuld tot ${selections.length} (pool=${allProperties.length}).`);
+  }
+
   log?.setCounts({ selectedCount: selections.length });
 
   try {
