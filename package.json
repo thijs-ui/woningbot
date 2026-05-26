@@ -1,7 +1,7 @@
 {
   "name": "woningbot",
   "version": "3.0.0",
-  "description": "Slimme Slack bot voor Spaans vastgoed — WoningBot (AI-makelaarassistent) + NieuwbouwBot (projecten-database met dagelijkse sync)",
+  "description": "AI-makelaarassistent voor Spaans vastgoed — REST API voor het Costa Select dashboard + dagelijkse alert-DMs via Slack",
   "main": "src/app.js",
   "scripts": {
     "start": "node src/app.js",
@@ -9,8 +9,6 @@
     "sync": "node src/jobs/nieuwbouw-sync.js"
   },
   "keywords": [
-    "slack",
-    "bot",
     "real-estate",
     "spain",
     "idealista",
@@ -26,7 +24,7 @@
   "license": "MIT",
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",
-    "@slack/bolt": "^4.1.0",
+    "@slack/web-api": "^7.15.0",
     "@upstash/redis": "^1.37.0",
     "apify-client": "^2.22.3",
     "cheerio": "^1.2.0",

@@ -18,7 +18,7 @@ const { refineSelection } = require('./services/claude-refiner');
 const { getThread, setThread, updateThread, addConversation } = require('./store/thread-memory');
 const { claudeRetry } = require('./services/claude-retry');
 const { getPricesForLocation, getPriceHistory, comparePrices, formatPriceDataForClaude } = require('./services/ev-prices');
-const { lookupProperty, getClientProperties, getAllClients } = require('./services/client-service');
+const { lookupProperty } = require('./services/client-service');
 const { scrapeCostaSelectPage } = require('./services/costaselect-scraper');
 const { lookupIdealista } = require('./services/idealista-lookup');
 const {
@@ -146,8 +146,6 @@ Mogelijke intents:
 - "pitch" — Wil een verkooppitch/presentatie voor een woning. Bevat URL of referentienummer.
 - "buurt" — Wil informatie over een buurt/wijk/stad.
 - "prijs" — Wil prijsinformatie, marktdata, trends voor een locatie.
-- "klant" — Wil klantgegevens bekijken, shortlist, of alle klanten.
-- "alert" — Wil een alert aanmaken, bekijken of stoppen.
 - "verfijn" — Verfijnt een eerdere zoekopdracht (alleen als er een actieve sessie is).
 - "algemeen" — Iets anders, algemene vraag.
 
@@ -161,8 +159,6 @@ Voorbeelden:
 - "Maak een pitch voor 771846" → {"intent": "pitch", "query": "771846"}
 - "Hoe is de buurt in Jávea?" → {"intent": "buurt", "query": "Jávea"}
 - "Wat zijn de prijzen in Marbella?" → {"intent": "prijs", "query": "Marbella"}
-- "Shortlist van Jan Janssen" → {"intent": "klant", "query": "Jan Janssen"}
-- "Alert voor nieuwbouw in Estepona, max 400k" → {"intent": "alert", "query": "nieuwbouw in Estepona, max 400k"}
 - "Toon alleen villa's met zwembad" → {"intent": "verfijn", "query": "alleen villa's met zwembad"}`;
 
 async function detectIntent(message) {
@@ -233,12 +229,6 @@ expressApp.post('/api/chat', async (req, res) => {
         break;
       case 'prijs':
         result = await handlePrijs(query);
-        break;
-      case 'klant':
-        result = await handleKlant(query);
-        break;
-      case 'alert':
-        result = await handleAlert(query);
         break;
       default:
         result = await handleAlgemeen(message);
@@ -1247,93 +1237,6 @@ Geef:
   return { response: prijsResponse.content[0].text };
 }
 
-// ─── Handler: Klant ────────────────────────────────────────────────────────
-
-async function handleKlant(queryText) {
-  const input = queryText.trim().toLowerCase();
-
-  if (input === 'lijst' || input === 'alle' || input === 'all') {
-    try {
-      const clients = await getAllClients();
-      if (!clients || clients.length === 0) {
-        return { response: 'Geen klanten gevonden.' };
-      }
-      const list = clients.map(c => `• ${c.client_name} (${c.count || '?'} woningen)`).join('\n');
-      return { response: `**Alle klanten:**\n\n${list}` };
-    } catch (err) {
-      return { response: 'Kon de klantenlijst niet ophalen.' };
-    }
-  }
-
-  // Specific client
-  const clientName = queryText.trim();
-  if (!clientName) {
-    return { response: 'Geef een klantnaam op of typ "lijst" voor alle klanten.\n\nBijvoorbeeld: "Klant Jan Janssen"' };
-  }
-
-  try {
-    const properties = await getClientProperties(clientName);
-    if (!properties || properties.length === 0) {
-      return { response: `Geen opgeslagen woningen gevonden voor "${clientName}".` };
-    }
-
-    const propList = properties.map(row => {
-      const p = row.property || {};
-      return [
-        p.price ? `€${Number(p.price).toLocaleString('nl-NL')}` : '',
-        p.property_type || '',
-        p.town || '',
-        p.beds ? `${p.beds} slpk` : '',
-        row.note ? `📝 ${row.note}` : '',
-        row.url ? row.url : '',
-      ].filter(Boolean).join(' · ');
-    }).join('\n');
-
-    return { response: `**Shortlist van ${clientName}** (${properties.length} woningen):\n\n${propList}` };
-  } catch (err) {
-    return { response: `Kon de shortlist van "${clientName}" niet ophalen.` };
-  }
-}
-
-// ─── Handler: Alert ────────────────────────────────────────────────────────
-
-async function handleAlert(queryText) {
-  const input = queryText.trim().toLowerCase();
-
-  if (input === 'lijst' || input === 'bekijk' || input === 'show') {
-    return { response: 'Alerts bekijken is momenteel alleen beschikbaar via Slack (/alert lijst). Web-interface volgt binnenkort.' };
-  }
-
-  if (input.startsWith('stop')) {
-    return { response: 'Alerts stoppen is momenteel alleen beschikbaar via Slack (/alert stop). Web-interface volgt binnenkort.' };
-  }
-
-  // Create alert — parse with Claude
-  try {
-    const parseResponse = await claudeRetry(() => claude.messages.create({
-      model: CLAUDE_MODEL,
-      max_tokens: 300,
-      messages: [{
-        role: 'user',
-        content: `Parse deze alert-criteria naar JSON. Geef ALLEEN JSON terug:\n{"location": string|null, "min_price": number|null, "max_price": number|null, "min_rooms": number|null, "has_pool": boolean|null, "has_sea_view": boolean|null}\n\nCriteria: "${queryText}"`,
-      }],
-    }));
-
-    const text = parseResponse.content[0].text;
-    const criteria = JSON.parse(text.match(/\{[\s\S]*\}/)?.[0] || '{}');
-
-    if (!criteria.location) {
-      return { response: 'Geef een locatie op voor de alert. Bijvoorbeeld: "Alert nieuwbouw Estepona, max 400k, 2 slpk"' };
-    }
-
-    return {
-      response: `Alert-criteria herkend:\n• Locatie: ${criteria.location}\n${criteria.max_price ? `• Max. prijs: €${criteria.max_price.toLocaleString('nl-NL')}\n` : ''}${criteria.min_rooms ? `• Min. slaapkamers: ${criteria.min_rooms}\n` : ''}\nAlerts aanmaken via het platform wordt binnenkort ondersteund. Gebruik voorlopig /alert in Slack.`,
-    };
-  } catch (err) {
-    return { response: 'Kon de alert-criteria niet verwerken. Probeer: "Alert nieuwbouw Estepona, max 400k"' };
-  }
-}
-
 // ─── Handler: Algemeen ─────────────────────────────────────────────────────
 
 async function handleAlgemeen(message) {
@@ -1348,9 +1251,7 @@ Je kunt helpen met:
 • Woningen vergelijken (geef 2+ URLs)
 • Verkooppitch maken (geef een URL of referentienummer)
 • Buurtinformatie (bijv. "buurt Jávea")
-• Prijsanalyse (bijv. "prijzen Marbella")
-• Klant-shortlists bekijken
-• Alerts instellen`,
+• Prijsanalyse (bijv. "prijzen Marbella")`,
     messages: [{ role: 'user', content: message }],
   }));
 

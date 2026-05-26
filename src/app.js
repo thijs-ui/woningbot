@@ -1,76 +1,20 @@
 require('dotenv').config();
 
-const { App } = require('@slack/bolt');
 const { WebClient } = require('@slack/web-api');
 const cron = require('node-cron');
-const { handleZoekwoning } = require('./handlers/zoekwoning');
-const { handleThreadReply } = require('./handlers/thread-reply');
-const { handleNieuwbouw } = require('./handlers/nieuwbouw');
-const { handleProject } = require('./handlers/project');
-const { handlePrijs } = require('./handlers/prijs');
-const { handleAlert, handleStopAlertAction } = require('./handlers/alert');
-const { handleSave } = require('./handlers/save');
-const { handleVergelijk } = require('./handlers/vergelijk');
-const { handlePitch } = require('./handlers/pitch');
-const { handleBuurt } = require('./handlers/buurt');
-const { handleKlant, handleRemoveClientProperty } = require('./handlers/klant');
 const { runAlertCheck } = require('./jobs/alert-check');
 const { runPrewarm } = require('./jobs/prewarm');
 const { startApiServer } = require('./api');
 
-const app = new App({
-  token: process.env.SLACK_BOT_TOKEN,
-  appToken: process.env.SLACK_APP_TOKEN,
-  socketMode: true,
-});
-
-// Standalone WebClient voor cron DMs — onafhankelijk van Bolt zodat we later
-// Bolt + slash commands kunnen verwijderen zonder de daily alert DMs te raken.
+// Slack WebClient voor cron DMs (dashboard-alerts). Bot heeft alleen
+// chat:write + users:read.email scopes nodig — slash commands & socket
+// mode zijn niet meer in gebruik.
 const slack = new WebClient(process.env.SLACK_BOT_TOKEN);
 
-// Register slash commands
-app.command('/zoekwoning', handleZoekwoning);
-app.command('/nieuwbouw', handleNieuwbouw);
-app.command('/project', handleProject);
-app.command('/prijs', handlePrijs);
-app.command('/alert', handleAlert);
-app.command('/save', handleSave);
-app.command('/vergelijk', handleVergelijk);
-app.command('/pitch', handlePitch);
-app.command('/buurt', handleBuurt);
-app.command('/klant', handleKlant);
-
-// Register Slack action handlers (interactive buttons)
-app.action('stop_alert', handleStopAlertAction);
-app.action('remove_client_property', handleRemoveClientProperty);
-
-// Listen for ALL message events — filter in handler
-app.event('message', async (args) => {
-  const { event } = args;
-  const ts = new Date().toISOString();
-
-  if (event.thread_ts) {
-    console.log(`[${ts}] [Event] Thread message received: thread_ts=${event.thread_ts}, user=${event.user || 'bot'}, subtype=${event.subtype || 'none'}, text="${(event.text || '').substring(0, 80)}"`);
-  }
-
-  try {
-    await handleThreadReply(args);
-  } catch (err) {
-    console.error(`[${ts}] [Event] Error in handleThreadReply:`, err);
-  }
-});
-
-// Global error handler
-app.error(async (error) => {
-  const ts = new Date().toISOString();
-  console.error(`[${ts}] [WoningBot] Unhandled error:`, error);
-});
-
 (async () => {
-  await app.start();
-  console.log('⚡ WoningBot V2 is running in Socket Mode!');
-  console.log('📌 Portals: Idealista (custom scraper) + Supabase (nieuwbouw DB + E&V prices)');
-  console.log('📌 Commands: /zoekwoning, /nieuwbouw, /project, /prijs, /alert, /save, /klant, /vergelijk, /pitch, /buurt');
+  console.log('⚡ WoningBot is running');
+  console.log('📌 Portals: Idealista (Apify) + Supabase (nieuwbouw DB + E&V prices)');
+  console.log('📌 Interface: REST API voor Costa Select dashboard + dagelijkse alert-DMs via Slack');
 
   // Daily alert check at 07:00 UTC (08:00 CET / 09:00 CEST)
   cron.schedule('0 7 * * *', () => {
@@ -88,6 +32,6 @@ app.error(async (error) => {
   });
   console.log('⏰ Prewarm scheduled: daily at 04:00 UTC (05:00 CET)');
 
-  // Start REST API server alongside Slack bot
+  // Start REST API server
   startApiServer();
 })();

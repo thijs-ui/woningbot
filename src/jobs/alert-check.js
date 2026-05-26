@@ -4,19 +4,6 @@
 
 const { getActiveAlerts, updateLastChecked, updateIdealistaSeenCodes } = require('../services/alert-service');
 const { findMatches } = require('../services/alert-matcher');
-const { getShortlistForPriceCheck, updateLastKnownPrice } = require('../services/client-service');
-
-const SUPABASE_URL = (process.env.SUPABASE_URL || '').replace(/\/$/, '');
-const SUPABASE_KEY = process.env.SUPABASE_KEY || process.env.SUPABASE_ANON_KEY || '';
-
-async function sbFetch(path) {
-  const res = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
-    headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` },
-  });
-  const text = await res.text();
-  if (!res.ok) throw new Error(`Supabase ${res.status}: ${text.slice(0, 200)}`);
-  return text ? JSON.parse(text) : null;
-}
 
 // Rate limit: wait between DMs to avoid Slack rate limits
 const DM_DELAY_MS = 1500;
@@ -115,128 +102,6 @@ async function runAlertCheck(slack) {
   }
 
   console.log(`[${ts}] [AlertCheck] Done. ${alerts.length} alerts checked, ${totalMatches} matches, ${totalNotified} notifications sent, ${totalErrors} errors.`);
-
-  // Prijsdaling check voor shortlists
-  await runPriceDropCheck(slack);
-}
-
-/**
- * Controleer of shortlist-woningen in prijs gedaald zijn.
- */
-async function runPriceDropCheck(slack) {
-  const ts = new Date().toISOString();
-  console.log(`[${ts}] [PriceDrop] Starting shortlist price drop check...`);
-
-  let entries;
-  try {
-    entries = await getShortlistForPriceCheck();
-    if (!entries?.length) {
-      console.log(`[${ts}] [PriceDrop] No shortlist entries with known price. Done.`);
-      return;
-    }
-  } catch (err) {
-    console.error(`[${ts}] [PriceDrop] Failed to fetch shortlist:`, err.message);
-    return;
-  }
-
-  // Batch: haal actuele prijzen op voor alle unieke refs
-  const refs = [...new Set(entries.map(e => e.ref))];
-  let currentPrices = {};
-  try {
-    const refFilter = refs.map(r => encodeURIComponent(r)).join(',');
-    const props = await sbFetch(
-      `resales_properties?ref=in.(${refFilter})&select=ref,price,property_type,town,url`
-    );
-    for (const p of (props || [])) currentPrices[p.ref] = p;
-  } catch (err) {
-    console.error(`[${ts}] [PriceDrop] Failed to fetch current prices:`, err.message);
-    return;
-  }
-
-  // Groepeer dalingen per gebruiker zodat we één DM sturen per persoon
-  const dropsByUser = {};
-  for (const entry of entries) {
-    const current = currentPrices[entry.ref];
-    if (!current?.price) continue;
-
-    const oldPrice = Number(entry.last_known_price);
-    const newPrice = Number(current.price);
-
-    if (newPrice < oldPrice) {
-      if (!dropsByUser[entry.slack_user_id]) dropsByUser[entry.slack_user_id] = [];
-      dropsByUser[entry.slack_user_id].push({ entry, current, oldPrice, newPrice });
-    }
-  }
-
-  const userIds = Object.keys(dropsByUser);
-  console.log(`[${ts}] [PriceDrop] ${userIds.length} gebruikers met prijsdalingen gevonden`);
-
-  for (const userId of userIds) {
-    const drops = dropsByUser[userId];
-    try {
-      await sendPriceDropNotification(slack, userId, drops);
-      // Update last_known_price voor elk gedaald pand
-      for (const { entry, newPrice } of drops) {
-        await updateLastKnownPrice(entry.id, newPrice);
-      }
-      console.log(`[${ts}] [PriceDrop] Notificatie verstuurd naar ${userId} voor ${drops.length} pand(en)`);
-    } catch (err) {
-      console.error(`[${ts}] [PriceDrop] DM mislukt voor ${userId}:`, err.message);
-    }
-    await sleep(DM_DELAY_MS);
-  }
-
-  console.log(`[${ts}] [PriceDrop] Done.`);
-}
-
-/**
- * Stuur een DM met alle prijsdalingen voor één gebruiker.
- */
-async function sendPriceDropNotification(slack, userId, drops) {
-  const blocks = [
-    {
-      type: 'section',
-      text: {
-        type: 'mrkdwn',
-        text: `📉 *${drops.length} shortlist-woning${drops.length > 1 ? 'en zijn' : ' is'} in prijs gedaald*`,
-      },
-    },
-    { type: 'divider' },
-  ];
-
-  for (const { entry, current, oldPrice, newPrice } of drops) {
-    const saving   = oldPrice - newPrice;
-    const pct      = Math.round(((oldPrice - newPrice) / oldPrice) * 100);
-    const title    = `${current.property_type || 'Property'} in ${current.town || '?'}`;
-    const propUrl  = current.url || null;
-
-    blocks.push({
-      type: 'section',
-      text: {
-        type: 'mrkdwn',
-        text: [
-          propUrl ? `*<${propUrl}|${title}>*` : `*${title}*`,
-          `_Klant: ${entry.client_name}_`,
-          `~~€${oldPrice.toLocaleString('nl-NL')}~~ → *€${newPrice.toLocaleString('nl-NL')}*`,
-          `📉 €${saving.toLocaleString('nl-NL')} goedkoper (-${pct}%)`,
-        ].join('\n'),
-      },
-    });
-  }
-
-  blocks.push({
-    type: 'context',
-    elements: [{
-      type: 'mrkdwn',
-      text: '_Gebruik `/klant [naam]` om de shortlist te bekijken._',
-    }],
-  });
-
-  await slack.chat.postMessage({
-    channel: userId,
-    blocks,
-    text: `📉 ${drops.length} shortlist-woning${drops.length > 1 ? 'en zijn' : ' is'} in prijs gedaald`,
-  });
 }
 
 /**
@@ -259,10 +124,6 @@ async function sendMatchesDM(slack, alert, matches, kind) {
     kind === 'idealista_resales' ? `Idealista resale${count > 1 ? 's' : ''}` :
                                    `Costa Select listing${count > 1 ? 's' : ''}`;
 
-  const moreCommand =
-    kind === 'nieuwbouw' ? `/nieuwbouw ${alert.location || ''}`.trim() :
-                           '/zoekwoning';
-
   const blocks = [
     {
       type: 'section',
@@ -280,7 +141,7 @@ async function sendMatchesDM(slack, alert, matches, kind) {
       type: 'context',
       elements: [{
         type: 'mrkdwn',
-        text: `_... en nog ${count - 5} meer. Gebruik \`${moreCommand}\` voor een volledig overzicht._`,
+        text: `_... en nog ${count - 5} meer. Bekijk de volledige resultaten in het Costa Select dashboard._`,
       }],
     });
   }
@@ -289,7 +150,7 @@ async function sendMatchesDM(slack, alert, matches, kind) {
     type: 'context',
     elements: [{
       type: 'mrkdwn',
-      text: `_Alert ID: \`${alert.id.slice(0, 8)}\` · Stop met \`/alert stop ${alert.id.slice(0, 8)}\`_`,
+      text: `_Alert ID: \`${alert.id.slice(0, 8)}\` · Beheer alerts in het dashboard._`,
     }],
   });
 
