@@ -3,7 +3,7 @@
  *
  * Wordt gebruikt voor:
  *   - Backfill (scripts/backfill-embeddings.js): batches van properties → vectors
- *   - Query-time (handlers/zoekwoning, nieuwbouw): soft-criteria → query vector
+ *   - Query-time (api.js handleNewSearch/handleNieuwbouw): soft-criteria → query vector
  *   - Scrape-integratie: nieuwe property direct embedden
  *
  * Output: array of 1536-dim floats per input. Eén batch-call kan tot 2048 inputs
