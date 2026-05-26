@@ -1,6 +1,7 @@
 require('dotenv').config();
 
 const { App } = require('@slack/bolt');
+const { WebClient } = require('@slack/web-api');
 const cron = require('node-cron');
 const { handleZoekwoning } = require('./handlers/zoekwoning');
 const { handleThreadReply } = require('./handlers/thread-reply');
@@ -22,6 +23,10 @@ const app = new App({
   appToken: process.env.SLACK_APP_TOKEN,
   socketMode: true,
 });
+
+// Standalone WebClient voor cron DMs — onafhankelijk van Bolt zodat we later
+// Bolt + slash commands kunnen verwijderen zonder de daily alert DMs te raken.
+const slack = new WebClient(process.env.SLACK_BOT_TOKEN);
 
 // Register slash commands
 app.command('/zoekwoning', handleZoekwoning);
@@ -71,7 +76,7 @@ app.error(async (error) => {
   cron.schedule('0 7 * * *', () => {
     const ts = new Date().toISOString();
     console.log(`[${ts}] [Cron] Triggering daily alert check...`);
-    runAlertCheck(app).catch(err => console.error(`[${ts}] [Cron] Alert check error:`, err));
+    runAlertCheck(slack).catch(err => console.error(`[${ts}] [Cron] Alert check error:`, err));
   });
   console.log('⏰ Alert check scheduled: daily at 07:00 UTC (08:00 CET)');
 

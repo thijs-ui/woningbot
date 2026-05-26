@@ -27,9 +27,9 @@ function sleep(ms) {
 
 /**
  * Main alert check function. Called by cron scheduler in app.js.
- * @param {Object} app - Slack Bolt app instance (needed for chat.postMessage)
+ * @param {Object} slack - Slack WebClient instance (needed for chat.postMessage)
  */
-async function runAlertCheck(app) {
+async function runAlertCheck(slack) {
   const ts = new Date().toISOString();
   console.log(`[${ts}] [AlertCheck] Starting daily alert check...`);
 
@@ -84,7 +84,7 @@ async function runAlertCheck(app) {
         if (job.matches.length === 0) continue;
         totalMatches += job.matches.length;
         try {
-          await sendMatchesDM(app, alert, job.matches, job.kind);
+          await sendMatchesDM(slack, alert, job.matches, job.kind);
           totalNotified++;
           console.log(`[${ts}] [AlertCheck] ${job.label} notificatie verstuurd voor alert ${shortId}`);
         } catch (dmErr) {
@@ -117,13 +117,13 @@ async function runAlertCheck(app) {
   console.log(`[${ts}] [AlertCheck] Done. ${alerts.length} alerts checked, ${totalMatches} matches, ${totalNotified} notifications sent, ${totalErrors} errors.`);
 
   // Prijsdaling check voor shortlists
-  await runPriceDropCheck(app);
+  await runPriceDropCheck(slack);
 }
 
 /**
  * Controleer of shortlist-woningen in prijs gedaald zijn.
  */
-async function runPriceDropCheck(app) {
+async function runPriceDropCheck(slack) {
   const ts = new Date().toISOString();
   console.log(`[${ts}] [PriceDrop] Starting shortlist price drop check...`);
 
@@ -174,7 +174,7 @@ async function runPriceDropCheck(app) {
   for (const userId of userIds) {
     const drops = dropsByUser[userId];
     try {
-      await sendPriceDropNotification(app, userId, drops);
+      await sendPriceDropNotification(slack, userId, drops);
       // Update last_known_price voor elk gedaald pand
       for (const { entry, newPrice } of drops) {
         await updateLastKnownPrice(entry.id, newPrice);
@@ -192,7 +192,7 @@ async function runPriceDropCheck(app) {
 /**
  * Stuur een DM met alle prijsdalingen voor één gebruiker.
  */
-async function sendPriceDropNotification(app, userId, drops) {
+async function sendPriceDropNotification(slack, userId, drops) {
   const blocks = [
     {
       type: 'section',
@@ -232,7 +232,7 @@ async function sendPriceDropNotification(app, userId, drops) {
     }],
   });
 
-  await app.client.chat.postMessage({
+  await slack.chat.postMessage({
     channel: userId,
     blocks,
     text: `📉 ${drops.length} shortlist-woning${drops.length > 1 ? 'en zijn' : ' is'} in prijs gedaald`,
@@ -243,7 +243,7 @@ async function sendPriceDropNotification(app, userId, drops) {
  * Stuur een DM met matches. Source-agnostic: consumeert de normalized shape uit
  * alert-matcher.findMatches. `kind` bepaalt alleen header-tekst en de "meer"-link.
  */
-async function sendMatchesDM(app, alert, matches, kind) {
+async function sendMatchesDM(slack, alert, matches, kind) {
   const count = matches.length;
   const preview = matches.slice(0, 5);
 
@@ -293,7 +293,7 @@ async function sendMatchesDM(app, alert, matches, kind) {
     }],
   });
 
-  await app.client.chat.postMessage({
+  await slack.chat.postMessage({
     channel: alert.slack_user_id,
     blocks,
     text: `🔔 ${count} nieuwe ${headerLabel} matchen met jouw alert (${filterText})`,
