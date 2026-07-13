@@ -3,7 +3,7 @@ const { claudeRetry } = require('./claude-retry');
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-const CLAUDE_MODEL = process.env.CLAUDE_MODEL || 'claude-sonnet-4-20250514';
+const CLAUDE_MODEL = process.env.CLAUDE_MODEL || 'claude-sonnet-5';
 
 const SYSTEM_PROMPT = `Je bent een vastgoedconsultant-assistent voor een Nederlandse buyer's agent in Spanje. Je krijgt twee dingen:
 
@@ -175,7 +175,7 @@ ${JSON.stringify(preparedProps, null, 2)}`;
       messages: conversation,
     }, { label: `ClaudeSelector:attempt${attempt}` });
 
-    const text = response.content[0].text.trim();
+    const text = response.content.map(b => (b.type === 'text' ? b.text : '')).join('').trim();
     const result = extractJson(text);
 
     if (result.ok) {

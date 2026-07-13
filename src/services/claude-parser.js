@@ -164,7 +164,7 @@ async function parseSearchQuery(queryText) {
       messages: conversation,
     }, { label: `ClaudeParser:attempt${attempt}` });
 
-    lastResponseText = response.content[0].text.trim();
+    lastResponseText = response.content.map(b => (b.type === 'text' ? b.text : '')).join('').trim();
     const parseResult = tryParseJson(lastResponseText);
 
     if (!parseResult.ok) {
