@@ -21,7 +21,7 @@ const { claudeRetry } = require('./claude-retry');
 
 const TAVILY_API_KEY = process.env.TAVILY_API_KEY || '';
 const claude = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-const CLAUDE_MODEL = process.env.CLAUDE_MODEL || 'claude-sonnet-4-20250514';
+const CLAUDE_MODEL = process.env.CLAUDE_MODEL || 'claude-sonnet-5';
 
 if (!TAVILY_API_KEY) {
   console.warn('[ProjectInfo] WARNING: No TAVILY_API_KEY set. Project info lookups will fail.');
@@ -65,7 +65,7 @@ Antwoord ALLEEN met valid JSON:
       messages: [{ role: 'user', content: query }],
     }, { label: 'IntentClassifier' });
 
-    const text = response.content[0].text.trim();
+    const text = response.content.map(b => (b.type === 'text' ? b.text : '')).join('').trim();
     const cleaned = text.replace(/^```(?:json)?\n?/, '').replace(/\n?```$/, '').trim();
     const parsed = JSON.parse(cleaned);
 
@@ -291,7 +291,7 @@ Geef een uitgebreide samenvatting van dit nieuwbouwproject.${sourceCount === 0 ?
     messages: [{ role: 'user', content: truncatedPrompt }],
   }, { label: 'ProjectSummary' });
 
-  return response.content[0].text.trim();
+  return response.content.map(b => (b.type === 'text' ? b.text : '')).join('').trim();
 }
 
 // ─── Main project info function ─────────────────────────────────────────────

@@ -14,7 +14,7 @@
  * object you'd normally pass to claude.messages.create().
  */
 
-const FALLBACK_MODEL = process.env.CLAUDE_FALLBACK_MODEL || 'claude-3-5-haiku-20241022';
+const FALLBACK_MODEL = process.env.CLAUDE_FALLBACK_MODEL || 'claude-haiku-4-5-20251001';
 const MAX_RETRIES = 3;
 const BASE_DELAY_MS = 2000; // 2s, 4s, 8s
 

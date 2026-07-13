@@ -59,7 +59,7 @@ function getSlackClient() {
 // Sprint 2: per-stap modellen. Routing (intent) krijgt Haiku, zware
 // reasoning (selector / vergelijk / pitch / buurt / prijs / algemeen)
 // blijft op Sonnet.
-const CLAUDE_MODEL = process.env.CLAUDE_MODEL || 'claude-sonnet-4-20250514';
+const CLAUDE_MODEL = process.env.CLAUDE_MODEL || 'claude-sonnet-5';
 const CLAUDE_MODEL_INTENT = process.env.CLAUDE_MODEL_INTENT
   || process.env.CLAUDE_MODEL
   || 'claude-haiku-4-5-20251001';
@@ -168,7 +168,7 @@ async function detectIntent(message) {
       max_tokens: 150,
       messages: [{ role: 'user', content: `${INTENT_PROMPT}\n\nBericht: "${message}"` }],
     });
-    const text = response.content[0].text.trim();
+    const text = response.content.map(b => (b.type === 'text' ? b.text : '')).join('').trim();
     const json = JSON.parse(text.match(/\{[\s\S]*\}/)?.[0] || '{}');
     return { intent: json.intent || 'algemeen', query: json.query || message };
   } catch (err) {
@@ -1050,7 +1050,7 @@ async function handleVergelijk(queryText) {
     }],
   }));
 
-  const answer = comparison.content[0].text;
+  const answer = comparison.content.map(b => (b.type === 'text' ? b.text : '')).join('');
 
   return {
     response: answer,
@@ -1133,7 +1133,7 @@ Schrijf de pitch in het Nederlands. Maak het persoonlijk, professioneel en overt
   }));
 
   return {
-    response: pitchResponse.content[0].text,
+    response: pitchResponse.content.map(b => (b.type === 'text' ? b.text : '')).join(''),
     properties: [{
       id: prop.ref || prop.id || '',
       title: prop.title || `${prop.property_type || 'Woning'} in ${prop.town || ''}`,
@@ -1187,7 +1187,7 @@ Behandel:
     }],
   }));
 
-  return { response: buurtResponse.content[0].text };
+  return { response: buurtResponse.content.map(b => (b.type === 'text' ? b.text : '')).join('') };
 }
 
 // ─── Handler: Prijs ────────────────────────────────────────────────────────
@@ -1234,7 +1234,7 @@ Geef:
     }],
   }));
 
-  return { response: prijsResponse.content[0].text };
+  return { response: prijsResponse.content.map(b => (b.type === 'text' ? b.text : '')).join('') };
 }
 
 // ─── Handler: Algemeen ─────────────────────────────────────────────────────
@@ -1255,7 +1255,7 @@ Je kunt helpen met:
     messages: [{ role: 'user', content: message }],
   }));
 
-  return { response: response.content[0].text };
+  return { response: response.content.map(b => (b.type === 'text' ? b.text : '')).join('') };
 }
 
 // ─── Handler: Refinement (existing) ────────────────────────────────────────

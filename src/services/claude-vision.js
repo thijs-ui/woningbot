@@ -142,7 +142,7 @@ Oppervlakte: ${property.size_m2 || '?'} m²`;
       }],
     }, { label: 'ClaudeVision' });
 
-    const text = response.content[0].text.trim();
+    const text = response.content.map(b => (b.type === 'text' ? b.text : '')).join('').trim();
     const cleaned = text.replace(/^```(?:json)?\n?/, '').replace(/\n?```$/, '').trim();
     const parsed = JSON.parse(cleaned);
 
