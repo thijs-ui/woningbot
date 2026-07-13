@@ -170,7 +170,7 @@ ${JSON.stringify(preparedProps, null, 2)}`;
   for (let attempt = 1; attempt <= 2; attempt++) {
     const response = await claudeRetry(client, {
       model: CLAUDE_MODEL,
-      max_tokens: 4096,
+      max_tokens: 8192,
       system: SYSTEM_PROMPT,
       messages: conversation,
     }, { label: `ClaudeSelector:attempt${attempt}` });

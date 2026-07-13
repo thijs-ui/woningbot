@@ -35,12 +35,21 @@ async function claudeRetry(claude, params, opts = {}) {
   const label = opts.label || 'Claude';
   const originalModel = params.model;
 
+  // Sonnet 5 doet standaard extended thinking; die thinking-tokens tellen mee
+  // in max_tokens en kapten o.a. de selector-JSON af ("Unexpected end of JSON
+  // input") én maakten calls ~80s traag. Deze code is gebouwd voor een niet-
+  // denkend model (Sonnet 4), dus zetten we thinking uit tenzij de caller het
+  // expliciet meegeeft.
+  const callParams = params.thinking
+    ? params
+    : { ...params, thinking: { type: 'disabled' } };
+
   let lastError;
 
   // Phase 1: Try with the original model
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
-      return await claude.messages.create(params);
+      return await claude.messages.create(callParams);
     } catch (err) {
       lastError = err;
       const status = err.status || err.statusCode || 0;
@@ -65,7 +74,7 @@ async function claudeRetry(claude, params, opts = {}) {
     console.warn(`[${label}] All ${maxRetries} retries failed with ${originalModel}. Trying fallback model: ${FALLBACK_MODEL}`);
 
     try {
-      const fallbackParams = { ...params, model: FALLBACK_MODEL };
+      const fallbackParams = { ...callParams, model: FALLBACK_MODEL };
       const response = await claude.messages.create(fallbackParams);
       console.log(`[${label}] Fallback model ${FALLBACK_MODEL} succeeded.`);
       return response;
