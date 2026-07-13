@@ -446,56 +446,55 @@ async function searchIdealista(hardFilters) {
   const searchLocations = locations.slice(0, 15);
   console.log(`[Idealista] Searching ${searchLocations.length} location(s): ${searchLocations.join(', ')}${isNewBuild ? ' (nieuwbouw)' : ''}`);
 
-  const allListings = [];
-  let cacheHits = 0;
-  let apifyCalls = 0;
+  // Per-stad scrape als losse taak. igolaizola accepteert één locatie per run,
+  // dus we draaien de steden PARALLEL (met concurrency-cap tegen Apify-plan-
+  // limieten) i.p.v. sequentieel — dat was de grootste latency-bron (elke
+  // .call() blokkeert ~8-12s; N steden sequentieel = N×dat).
+  async function scrapeCity(city) {
+    // Cache-check vóór Apify (Sprint 6: per-stad scrape-cache, 1u TTL)
+    const cached = await queryCache.getIdealistaCity(city, hardFilters);
+    if (cached && Array.isArray(cached)) {
+      console.log(`[Idealista] ${city}: ${cached.length} listings uit cache (geen Apify-call)`);
+      return { listings: cached, fromCache: true, apifyCall: false };
+    }
 
-  // Run one actor call per city (igolaizola accepts one location per run)
-  for (const city of searchLocations) {
+    const actorInput = buildActorInput(city, hardFilters, isNewBuild);
+
+    // Safety check: if location resolved to null, skip this city
+    if (!actorInput.location) {
+      console.error(`[Idealista] Location "${city}" resolved to null — skipping.`);
+      return { listings: [], fromCache: false, apifyCall: false };
+    }
+
+    console.log(`[Idealista] ${city} → Location ID: ${actorInput.location}`);
+
+    const items = await callApifyActor(actorInput);
+
+    const cityListings = [];
+    let mapped = 0;
+    let failed = 0;
+    for (const item of items) {
+      const listing = mapApifyItem(item);
+      if (listing) {
+        cityListings.push(listing);
+        mapped++;
+      } else {
+        failed++;
+      }
+    }
+
+    // Cache deze stad voor volgende queries (1u TTL via query-cache)
+    void queryCache.setIdealistaCity(city, hardFilters, cityListings);
+
+    console.log(`[Idealista] ${city}: ${mapped} mapped, ${failed} skipped (${items.length} raw)`);
+    return { listings: cityListings, fromCache: false, apifyCall: true };
+  }
+
+  async function scrapeCitySafe(city) {
     try {
-      // Cache-check vóór Apify (Sprint 6: per-stad scrape-cache, 1u TTL)
-      const cached = await queryCache.getIdealistaCity(city, hardFilters);
-      if (cached && Array.isArray(cached)) {
-        allListings.push(...cached);
-        cacheHits++;
-        console.log(`[Idealista] ${city}: ${cached.length} listings uit cache (geen Apify-call)`);
-        continue;
-      }
-
-      const actorInput = buildActorInput(city, hardFilters, isNewBuild);
-
-      // Safety check: if location resolved to null, skip this city
-      if (!actorInput.location) {
-        console.error(`[Idealista] Location "${city}" resolved to null — skipping.`);
-        continue;
-      }
-
-      console.log(`[Idealista] ${city} → Location ID: ${actorInput.location}`);
-
-      const items = await callApifyActor(actorInput);
-      apifyCalls++;
-
-      const cityListings = [];
-      let mapped = 0;
-      let failed = 0;
-      for (const item of items) {
-        const listing = mapApifyItem(item);
-        if (listing) {
-          cityListings.push(listing);
-          mapped++;
-        } else {
-          failed++;
-        }
-      }
-
-      allListings.push(...cityListings);
-      // Cache deze stad voor volgende queries (1u TTL via query-cache)
-      void queryCache.setIdealistaCity(city, hardFilters, cityListings);
-
-      console.log(`[Idealista] ${city}: ${mapped} mapped, ${failed} skipped (${items.length} raw)`);
+      return await scrapeCity(city);
     } catch (err) {
       console.error(`[Idealista] Error searching ${city}: ${err.message}`);
-
       // Detect auth errors
       if (err.message?.includes('401') || err.message?.includes('403') || err.message?.includes('token')) {
         console.error('[Idealista] APIFY_API_TOKEN is invalid or expired. Check Railway Variables.');
@@ -504,7 +503,28 @@ async function searchIdealista(hardFilters) {
       if (err.message?.includes('402') || err.message?.includes('payment') || err.message?.includes('subscription')) {
         console.error('[Idealista] Actor subscription required. Subscribe at https://apify.com/igolaizola/idealista-scraper');
       }
+      return { listings: [], fromCache: false, apifyCall: false, error: err.message };
     }
+  }
+
+  // Concurrency-cap: standaard 5 gelijktijdige Apify-runs (override via
+  // IDEALISTA_CONCURRENCY). Voorkomt dat we tegen plan-/rate-limits aanlopen
+  // terwijl we toch fors parallelliseren. Steden zijn al gecapt op 15.
+  const concurrency = Math.max(1, Number(process.env.IDEALISTA_CONCURRENCY) || 5);
+  const results = [];
+  for (let i = 0; i < searchLocations.length; i += concurrency) {
+    const batch = searchLocations.slice(i, i + concurrency);
+    const settled = await Promise.all(batch.map(scrapeCitySafe));
+    results.push(...settled);
+  }
+
+  const allListings = [];
+  let cacheHits = 0;
+  let apifyCalls = 0;
+  for (const r of results) {
+    if (r.listings && r.listings.length) allListings.push(...r.listings);
+    if (r.fromCache) cacheHits++;
+    if (r.apifyCall) apifyCalls++;
   }
 
   console.log(`[Idealista] Total: ${allListings.length} properties from ${searchLocations.length} location(s) — cache hits: ${cacheHits}/${searchLocations.length}, Apify calls: ${apifyCalls}`);

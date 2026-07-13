@@ -653,6 +653,9 @@ async function attachIdealistaSimilarity(listings, queryEmbedding) {
   const inputs = [];
   const idxMap = [];
   for (let i = 0; i < listings.length; i++) {
+    // Skip listings die al een similarity hebben (bv. supabase-resultaten uit
+    // de RPC) — die hoeven we niet opnieuw te embedden.
+    if (typeof listings[i].similarity === 'number') continue;
     const text = buildListingPostMappedInput(listings[i]);
     if (text && text.trim().length > 20) {
       inputs.push(text);
@@ -661,18 +664,30 @@ async function attachIdealistaSimilarity(listings, queryEmbedding) {
   }
   if (inputs.length === 0) return listings;
 
+  // Cap het aantal interactieve embeds zodat één OpenAI-call ruim onder de 40K
+  // TPM Tier-1-limiet blijft (~600 tok/listing → 60 ≈ 36K). Bij een brede query
+  // met een grote gefilterde pool krijgen de overige idealista-listings geen
+  // semantic_match (in de selector geen minpunt); zo voorkomen we een
+  // TPM-429-cascade op het request-pad. Supabase-listings zijn hierboven al
+  // overgeslagen omdat die hun similarity al uit de RPC hebben.
+  const MAX_INTERACTIVE_EMBEDS = 60;
+  const capInputs = inputs.slice(0, MAX_INTERACTIVE_EMBEDS);
+  const capIdxMap = idxMap.slice(0, MAX_INTERACTIVE_EMBEDS);
+
   let vectors;
   try {
-    vectors = await embedListings(inputs);
+    // Interactief request-pad: één batch, geen 16s inter-batch-slaap (die
+    // throttle is voor de nachtelijke backfill).
+    vectors = await embedListings(capInputs, { batchSize: MAX_INTERACTIVE_EMBEDS, interBatchSleepMs: 0 });
   } catch (err) {
     console.warn(`[API] Idealista similarity-embed faalde: ${err.message}`);
     return listings;
   }
 
-  for (let j = 0; j < idxMap.length; j++) {
-    listings[idxMap[j]].similarity = cosineSimilarity(queryEmbedding, vectors[j]);
+  for (let j = 0; j < capIdxMap.length; j++) {
+    listings[capIdxMap[j]].similarity = cosineSimilarity(queryEmbedding, vectors[j]);
   }
-  console.log(`[API] ${idxMap.length} Idealista listings verrijkt met similarity`);
+  console.log(`[API] ${capIdxMap.length}/${inputs.length} Idealista listings verrijkt met similarity`);
   return listings;
 }
 
@@ -769,8 +784,11 @@ async function handleNewSearch(queryText, log = null) {
     const live = coldCities.length > 0
       ? await searchIdealista({ ...hardFilters, locations: coldCities })
       : [];
-    const merged = [...warmListings, ...live];
-    return queryEmbedding ? attachIdealistaSimilarity(merged, queryEmbedding) : merged;
+    // Similarity-embedding is verplaatst naar NA de preFilter (zie hieronder),
+    // zodat we alleen de kleine gefilterde pool embedden i.p.v. alle ruwe
+    // listings — dat haalt de embedding uit de scrape-timing én uit de OpenAI
+    // TPM-bom.
+    return [...warmListings, ...live];
   })();
   const [idealistaSettled, supabaseSettled] = await Promise.allSettled([
     idealistaPromise,
@@ -812,6 +830,20 @@ async function handleNewSearch(queryText, log = null) {
       response: `Ik vond ${allRaw.length} woningen, maar geen daarvan voldoet aan je harde criteria. Probeer ruimere filters.`,
       sessionId, properties: [],
     };
+  }
+
+  // Similarity-embedding NA de filter: alleen de kleine, relevante pool
+  // (idealista-listings zonder similarity) wordt geëmbed i.p.v. alle ~1300 ruwe
+  // listings. Voorkomt de OpenAI TPM-bom en houdt de scrape snel. Alleen bij
+  // soft-criteria (queryEmbedding aanwezig); muteert allProperties in-place.
+  if (queryEmbedding) {
+    const endEmbed = log?.startStep('embed');
+    try {
+      await attachIdealistaSimilarity(allProperties, queryEmbedding);
+      endEmbed?.({ ok: true });
+    } catch (err) {
+      endEmbed?.({ ok: false, error: err.message });
+    }
   }
 
   let selectionResult;
@@ -1041,14 +1073,14 @@ async function handleVergelijk(queryText) {
     return details;
   }).join('\n\n');
 
-  const comparison = await claudeRetry(() => claude.messages.create({
+  const comparison = await claudeRetry(claude, {
     model: CLAUDE_MODEL,
     max_tokens: 1500,
     messages: [{
       role: 'user',
       content: `Je bent een ervaren Spaanse vastgoedadviseur. Vergelijk deze woningen voor een Nederlandse koper. Geef een duidelijke vergelijking met plus- en minpunten per woning en een conclusie. Antwoord in het Nederlands.\n\n${propDescriptions}`,
     }],
-  }));
+  }, { label: 'Compare' });
 
   const answer = comparison.content.map(b => (b.type === 'text' ? b.text : '')).join('');
 
@@ -1117,7 +1149,7 @@ async function handlePitch(queryText) {
     prop.desc_nl || prop.description ? `Beschrijving: ${(prop.desc_nl || prop.description || '').substring(0, 500)}` : null,
   ].filter(Boolean).join('\n');
 
-  const pitchResponse = await claudeRetry(() => claude.messages.create({
+  const pitchResponse = await claudeRetry(claude, {
     model: CLAUDE_MODEL,
     max_tokens: 2000,
     messages: [{
@@ -1130,7 +1162,7 @@ ${propDetails}
 
 Schrijf de pitch in het Nederlands. Maak het persoonlijk, professioneel en overtuigend. Benadruk de sterke punten en de unieke waardepropositie.`,
     }],
-  }));
+  }, { label: 'Pitch' });
 
   return {
     response: pitchResponse.content.map(b => (b.type === 'text' ? b.text : '')).join(''),
@@ -1169,7 +1201,7 @@ async function handleBuurt(queryText) {
     console.warn('[API] Price data for buurt failed:', err.message);
   }
 
-  const buurtResponse = await claudeRetry(() => claude.messages.create({
+  const buurtResponse = await claudeRetry(claude, {
     model: CLAUDE_MODEL,
     max_tokens: 2000,
     messages: [{
@@ -1185,7 +1217,7 @@ Behandel:
 6. Aandachtspunten of nadelen
 7. Prijsindicatie en marktsituatie${priceContext}`,
     }],
-  }));
+  }, { label: 'Buurt' });
 
   return { response: buurtResponse.content.map(b => (b.type === 'text' ? b.text : '')).join('') };
 }
@@ -1216,7 +1248,7 @@ async function handlePrijs(queryText) {
     ? `\n\nHistorische data:\n${historyData.map(h => `${h.year} Q${h.quarter}: €${h.price_per_sqm}/m² (${h.yoy_change_pct > 0 ? '+' : ''}${h.yoy_change_pct}%)`).join('\n')}`
     : '';
 
-  const prijsResponse = await claudeRetry(() => claude.messages.create({
+  const prijsResponse = await claudeRetry(claude, {
     model: CLAUDE_MODEL,
     max_tokens: 1500,
     messages: [{
@@ -1232,7 +1264,7 @@ Geef:
 3. Vergelijking met omliggende gebieden als relevant
 4. Advies voor kopers/investeerders`,
     }],
-  }));
+  }, { label: 'Prijs' });
 
   return { response: prijsResponse.content.map(b => (b.type === 'text' ? b.text : '')).join('') };
 }
@@ -1240,7 +1272,7 @@ Geef:
 // ─── Handler: Algemeen ─────────────────────────────────────────────────────
 
 async function handleAlgemeen(message) {
-  const response = await claudeRetry(() => claude.messages.create({
+  const response = await claudeRetry(claude, {
     model: CLAUDE_MODEL,
     max_tokens: 1000,
     system: `Je bent WoningBot, de AI-assistent van Costa Select — een Nederlandse aankoopmakelaar in Spanje. Je helpt consultants met het zoeken en beoordelen van Spaans vastgoed. Antwoord altijd in het Nederlands en wees beknopt maar behulpzaam.
@@ -1253,7 +1285,7 @@ Je kunt helpen met:
 • Buurtinformatie (bijv. "buurt Jávea")
 • Prijsanalyse (bijv. "prijzen Marbella")`,
     messages: [{ role: 'user', content: message }],
-  }));
+  }, { label: 'Algemeen' });
 
   return { response: response.content.map(b => (b.type === 'text' ? b.text : '')).join('') };
 }
