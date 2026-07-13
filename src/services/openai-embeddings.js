@@ -113,19 +113,26 @@ async function embed(text) {
  * Embed een batch teksten → array van 1536-dim float arrays (zelfde volgorde).
  * Splitst automatisch in chunks van MAX_BATCH_SIZE.
  */
-async function embedBatch(texts) {
+async function embedBatch(texts, opts = {}) {
   if (!isConfigured()) throw new Error('OPENAI_API_KEY not set');
   if (!Array.isArray(texts)) throw new Error('embedBatch() requires an array');
   if (texts.length === 0) return [];
 
+  // De defaults (batch 30, 16s slaap) zijn afgestemd op de nachtelijke backfill
+  // die de 40K TPM Tier-1-limiet moet respecteren. Het interactieve request-pad
+  // (een handvol listings ná preFilter) geeft { interBatchSleepMs: 0 } mee zodat
+  // een zoekopdracht niet minuten hangt.
+  const batchSize = opts.batchSize || MAX_BATCH_SIZE;
+  const interBatchSleepMs = opts.interBatchSleepMs != null ? opts.interBatchSleepMs : INTER_BATCH_SLEEP_MS;
+
   const inputs = texts.map(truncate);
   const out = [];
 
-  for (let i = 0; i < inputs.length; i += MAX_BATCH_SIZE) {
-    const chunk = inputs.slice(i, i + MAX_BATCH_SIZE);
+  for (let i = 0; i < inputs.length; i += batchSize) {
+    const chunk = inputs.slice(i, i + batchSize);
 
     // Throttle tussen batches om TPM-limiet te respecteren (skip voor de eerste)
-    if (i > 0) await sleep(INTER_BATCH_SLEEP_MS);
+    if (i > 0 && interBatchSleepMs > 0) await sleep(interBatchSleepMs);
 
     const vectors = await withRetry(
       () => callOpenAI(chunk),

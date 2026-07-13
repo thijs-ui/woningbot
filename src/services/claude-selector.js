@@ -69,10 +69,10 @@ Geef ALLEEN valid JSON terug:
       "rank": 1,
       "property_id": "originele ID uit de listing data",
       "match_score": 0-100,
-      "motivation": "2-3 zinnen in het Nederlands waarom deze woning bij de klant past. Wees specifiek: verwijs naar concrete details uit de beschrijving die matchen met de wensen. Vermeld relevante locatie-context. Noem ook eventuele minpunten.",
-      "highlights": ["3-5 korte tags die de match beschrijven"],
-      "reasons_for": ["3-5 korte zinnen (Nederlands) — wat maakt deze woning sterk voor deze klant"],
-      "reasons_against": ["1-3 korte zinnen (Nederlands) — eventuele zwakke punten, compromissen, of aandachtspunten. Lege array als er niets is."]
+      "motivation": "1-2 bondige zinnen in het Nederlands waarom deze woning past. Wees specifiek: verwijs naar een concreet detail + relevante locatie-context. Kort en zakelijk.",
+      "highlights": ["max 3 korte tags (1-3 woorden) die de match beschrijven"],
+      "reasons_for": ["2-3 zeer korte punten (Nederlands, elk een paar woorden) — sterke punten voor deze klant"],
+      "reasons_against": ["0-2 zeer korte punten (Nederlands) — zwakke punten of aandachtspunten. Lege array als er niets is."]
     }
   ]
 }
@@ -94,7 +94,7 @@ STRIKTE REGELS:
 /**
  * Truncate a description to max N words, stripping HTML.
  */
-function truncateDescription(desc, maxWords = 300) {
+function truncateDescription(desc, maxWords = 150) {
   if (!desc) return '';
   const clean = desc.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
   const words = clean.split(' ');
@@ -118,8 +118,6 @@ function preparePropertiesForClaude(properties) {
       size_m2: p.size_m2,
       description: truncateDescription(p.description),
       features: p.features || [],
-      url: p.url,
-      portal: p.source || 'idealista',
       is_new_build: p.is_new_build || false,
       municipality: p.municipality || '',
     };
@@ -158,11 +156,13 @@ function extractJson(text) {
 async function selectProperties(clientProfile, properties) {
   const preparedProps = preparePropertiesForClaude(properties);
 
+  // Compacte JSON (geen pretty-print): scheelt ~15-25% input-tokens zonder
+  // kwaliteitsverlies — Claude leest compacte JSON prima.
   const userMessage = `KLANTPROFIEL:
-${JSON.stringify(clientProfile, null, 2)}
+${JSON.stringify(clientProfile)}
 
 WONINGEN (${preparedProps.length} gevonden):
-${JSON.stringify(preparedProps, null, 2)}`;
+${JSON.stringify(preparedProps)}`;
 
   const conversation = [{ role: 'user', content: userMessage }];
   let lastError = null;
