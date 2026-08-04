@@ -19,7 +19,7 @@ const SUPABASE_URL = (
 // Service-role key heeft voorrang: deze service is server-side en moet RLS
 // kunnen bypassen voor reads op listings/units/resales_properties. Anon key
 // als fallback voor lokale dev. Aligned met alert-check.js precedence.
-const SUPABASE_KEY = process.env.SUPABASE_KEY || process.env.SUPABASE_ANON_KEY || '';
+const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY || process.env.SUPABASE_ANON_KEY || '';
 
 // ─── Synoniemen-maps ───────────────────────────────────────────────────────
 // Parser noemt iets "villa" terwijl Idealista (listings) "chalet" gebruikt en

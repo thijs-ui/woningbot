@@ -13,7 +13,7 @@
 const https = require('https');
 
 const SUPABASE_URL = process.env.SUPABASE_URL || 'https://sqafsrknbfzhkbxqhqlu.supabase.co';
-const SUPABASE_KEY = process.env.SUPABASE_ANON_KEY || '';
+const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY || '';
 
 // ─── Low-level Supabase REST helper ────────────────────────────────────────
 
