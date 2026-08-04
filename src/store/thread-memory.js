@@ -1,7 +1,7 @@
 const https = require('https');
 
 const SUPABASE_URL = (process.env.SUPABASE_URL || 'https://sqafsrknbfzhkbxqhqlu.supabase.co').replace(/\/$/, '');
-const SUPABASE_KEY = process.env.SUPABASE_ANON_KEY || '';
+const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY || '';
 const MAX_AGE_MS = 48 * 60 * 60 * 1000; // 48 hours
 
 // In-memory cache for fast repeated access within a session
