@@ -471,7 +471,10 @@ expressApp.post('/api/alert/save', async (req, res) => {
   // 1b. Duplicate detection — zelfde query_text op zelfde shortlist?
   try {
     const sbUrl = (process.env.SUPABASE_URL || '').replace(/\/$/, '');
-    const sbKey = process.env.SUPABASE_ANON_KEY || process.env.SUPABASE_KEY;
+    const sbKey =
+      process.env.SUPABASE_SERVICE_ROLE_KEY ||
+      process.env.SUPABASE_ANON_KEY ||
+      process.env.SUPABASE_KEY;
     const normalizedQuery = query_text.trim().toLowerCase();
     const checkUrl = `${sbUrl}/rest/v1/alerts?select=id,query_text&shortlist_id=eq.${encodeURIComponent(
       shortlist_id
@@ -594,7 +597,10 @@ expressApp.get('/api/alert/by-shortlist', async (req, res) => {
 
   try {
     const sbUrl = (process.env.SUPABASE_URL || '').replace(/\/$/, '');
-    const sbKey = process.env.SUPABASE_ANON_KEY || process.env.SUPABASE_KEY;
+    const sbKey =
+      process.env.SUPABASE_SERVICE_ROLE_KEY ||
+      process.env.SUPABASE_ANON_KEY ||
+      process.env.SUPABASE_KEY;
     const url = `${sbUrl}/rest/v1/alerts?select=*&shortlist_id=eq.${shortlist_id}&is_active=eq.true&order=created_at.desc`;
     const result = await fetch(url, {
       headers: { apikey: sbKey, Authorization: `Bearer ${sbKey}` },
