@@ -29,6 +29,7 @@ const {
   updateIdealistaSeenCodes,
 } = require('./services/alert-service');
 const { findMatches } = require('./services/alert-matcher');
+const { alertSlackDmsEnabled } = require('./services/alert-dms');
 const { WebClient: SlackWebClient } = require('@slack/web-api');
 const {
   embed: embedQuery,
@@ -568,9 +569,12 @@ expressApp.post('/api/alert/save', async (req, res) => {
     // 4. Initial-batch DM (test-modus): fire-and-forget zodat de save-response
     // niet wacht op de Idealista live-search (kan ~30-90s duren). User ziet
     // direct "alert geactiveerd" in 't dashboard, DM arriveert async.
-    runInitialBatch(slackUserId, alert).catch(err =>
-      console.error(`[${ts}] [Alert] Initial-batch faalde voor ${alert.id.slice(0, 8)}:`, err.message)
-    );
+    // Overgeslagen zolang de alert-DM's uit staan (zie services/alert-dms.js).
+    if (alertSlackDmsEnabled()) {
+      runInitialBatch(slackUserId, alert).catch(err =>
+        console.error(`[${ts}] [Alert] Initial-batch faalde voor ${alert.id.slice(0, 8)}:`, err.message)
+      );
+    }
 
     return res.json({ ok: true, alert });
   } catch (err) {

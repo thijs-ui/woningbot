@@ -4,6 +4,7 @@
 
 const { getActiveAlerts, updateLastChecked, updateIdealistaSeenCodes } = require('../services/alert-service');
 const { findMatches } = require('../services/alert-matcher');
+const { alertSlackDmsEnabled } = require('../services/alert-dms');
 
 // Rate limit: wait between DMs to avoid Slack rate limits
 const DM_DELAY_MS = 1500;
@@ -18,6 +19,10 @@ function sleep(ms) {
  */
 async function runAlertCheck(slack) {
   const ts = new Date().toISOString();
+  if (!alertSlackDmsEnabled()) {
+    console.log(`[${ts}] [AlertCheck] Alert-DM's staan uit — overgeslagen.`);
+    return;
+  }
   console.log(`[${ts}] [AlertCheck] Starting daily alert check...`);
 
   let alerts;
