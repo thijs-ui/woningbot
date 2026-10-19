@@ -3,6 +3,7 @@ require('dotenv').config();
 const { WebClient } = require('@slack/web-api');
 const cron = require('node-cron');
 const { runAlertCheck } = require('./jobs/alert-check');
+const { alertSlackDmsEnabled } = require('./services/alert-dms');
 const { runPrewarm } = require('./jobs/prewarm');
 const { startApiServer } = require('./api');
 
@@ -16,13 +17,18 @@ const slack = new WebClient(process.env.SLACK_BOT_TOKEN);
   console.log('📌 Portals: Idealista (Apify) + Supabase (nieuwbouw DB + E&V prices)');
   console.log('📌 Interface: REST API voor Costa Select dashboard + dagelijkse alert-DMs via Slack');
 
-  // Daily alert check at 07:00 UTC (08:00 CET / 09:00 CEST)
-  cron.schedule('0 7 * * *', () => {
-    const ts = new Date().toISOString();
-    console.log(`[${ts}] [Cron] Triggering daily alert check...`);
-    runAlertCheck(slack).catch(err => console.error(`[${ts}] [Cron] Alert check error:`, err));
-  });
-  console.log('⏰ Alert check scheduled: daily at 07:00 UTC (08:00 CET)');
+  // Daily alert check at 07:00 UTC (08:00 CET / 09:00 CEST). Alleen als de
+  // alert-DM's aan staan; uit = ook geen Apify-calls voor de alerts.
+  if (alertSlackDmsEnabled()) {
+    cron.schedule('0 7 * * *', () => {
+      const ts = new Date().toISOString();
+      console.log(`[${ts}] [Cron] Triggering daily alert check...`);
+      runAlertCheck(slack).catch(err => console.error(`[${ts}] [Cron] Alert check error:`, err));
+    });
+    console.log('⏰ Alert check scheduled: daily at 07:00 UTC (08:00 CET)');
+  } else {
+    console.log('⏸️  Alert check UIT (ALERT_SLACK_DMS_ENABLED != true) — geen Slack-DM\'s');
+  }
 
   // Daily prewarm at 04:00 UTC (05:00 CET / 06:00 CEST) — vóór ochtend-werkverkeer
   cron.schedule('0 4 * * *', () => {
